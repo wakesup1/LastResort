@@ -1,0 +1,31 @@
+{
+  "backlog_id": "LR-D03",
+  "run_date_local": "2026-10-11",
+  "timezone": "Asia/Bangkok",
+  "source_sha256": "c37a7e9211b2c72af66e75480d3a78c6b578a98edc1dd01afdb1a2bff68449e1",
+  "revision": "uncommitted experiment in initial repository",
+  "database": "PostgreSQL 14.20 (Homebrew) on aarch64-apple-darwin25.1.0, compiled by Apple clang version 17.0.0 (clang-1700.4.4.1), 64-bit",
+  "isolation": "read committed",
+  "workload": "two overlapping database transactions; one ticket",
+  "results": [
+    {
+      "case": "two_overlapping_requests_one_ticket",
+      "passed": true,
+      "lock_wait_observed": true,
+      "confirmed": 1,
+      "remaining": 0
+    },
+    {
+      "case": "insert_failure_rolls_back_decrement",
+      "passed": true,
+      "remaining_after_failure": 1,
+      "confirmed_after_failure": 0,
+      "subsequent_request_succeeded": true
+    }
+  ],
+  "limits": [
+    "Database experiment only; no HTTP API, sessions or browser flow.",
+    "Idempotency, sale windows, response loss and restart not covered.",
+    "Repeat on target PostgreSQL 17 during environment setup."
+  ]
+}

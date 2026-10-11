@@ -1,0 +1,65 @@
+# Dependencies and package manager caches (keep package-lock.json)
+node_modules/
+.npm/
+.pnpm-store/
+
+# Next.js build output and generated TypeScript files
+.next/
+/out/
+/dist/
+/build/
+next-env.d.ts
+*.tsbuildinfo
+
+# Test reports and coverage (keep tests)
+coverage/
+playwright-report/
+test-results/
+blob-report/
+.vitest/
+
+# Local project documentation
+/docs/
+
+# Local environment and credentials (commit only the safe example)
+.env*
+!.env.example
+.vercel/
+*.pem
+*.key
+
+# Runtime and package manager logs
+*.log
+*.log.*
+*.pid
+*.pid.lock
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Temporary local output and database exports (keep db/migrations/*.sql)
+/.cache/
+/tmp/
+/temp/
+/backups/
+/db/data/
+/db/dumps/
+*.dump
+*.sql.gz
+
+# Python inventory spike caches
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local editor and operating system files (keep shared editor configuration)
+.idea/
+*.swp
+*.swo
+*~
+.vscode/*.local.json
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
