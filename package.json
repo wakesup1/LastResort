@@ -1,0 +1,37 @@
+{
+  "name": "lastresort",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24 <25" },
+  "scripts": {
+    "predev": "tsx scripts/check-config.ts",
+    "dev": "next dev",
+    "build": "next build",
+    "prestart": "tsx scripts/check-config.ts",
+    "start": "next start",
+    "typecheck": "next typegen && tsc --noEmit",
+    "test": "vitest run tests/foundation.test.ts",
+    "test:integration": "vitest run tests/database.integration.test.ts",
+    "db:migrate": "tsx scripts/database.ts migrate",
+    "db:seed": "tsx scripts/database.ts seed",
+    "db:reset": "tsx scripts/database.ts reset",
+    "db:status": "tsx scripts/database.ts status"
+  },
+  "dependencies": {
+    "@next/env": "16.4.0",
+    "next": "16.4.0",
+    "pg": "8.23.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "5.0.3"
+  }
+}
