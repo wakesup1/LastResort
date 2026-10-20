@@ -1,6 +1,6 @@
 # LastResort
 
-A limited-capacity ticket booking platform. The first release has one demo event, guest sessions, and immediate confirmation. S1-05 provides the Next.js foundation, PostgreSQL 17, migrations, seed data, and a health check. S1-06 adds API contracts and CI. Event details and booking features will follow in later tasks. The project interface, sample data, and documentation are in English.
+A limited-capacity ticket booking platform. The first release has one demo event, guest sessions, and immediate confirmation. S1-05 provides the Next.js foundation, PostgreSQL 17, migrations, seed data, and a health check. S1-06 adds API contracts and CI. S1-08/S1-09 provide the event details page and server-derived sale status; guest sessions and booking actions follow in later tasks. The project interface, sample data, and documentation are in English.
 
 ## Run from a fresh checkout
 
@@ -16,7 +16,7 @@ npm run db:status
 npm run dev
 ```
 
-Open http://localhost:3000 for the placeholder home page. Check database readiness with:
+Open http://localhost:3000 for the demo event details and current sale status. Check database readiness with:
 
 ```sh
 curl -i http://localhost:3000/api/health
@@ -74,7 +74,7 @@ npm run build
 npm start
 ```
 
-Build and start require the example configuration. Building the placeholder page does not require an online database. The runtime health check requires a reachable database with migrations applied.
+Build and start require the example configuration. Building the event page does not require a reachable database; loading event details and the runtime health check do require a reachable database with migrations applied.
 
 The typecheck command generates Next.js types before checking TypeScript, including on a fresh clone. Generated types, build output, local configuration, test reports, and the local `docs/` directory are ignored by Git. Keep the dependency lockfile, safe environment example, migrations, and tests in version control.
 
@@ -89,7 +89,7 @@ If the database already exists, skip `createdb`. Integration tests cover repeate
 
 ## API contract and CI
 
-[api/openapi.json](api/openapi.json) is the OpenAPI 3.0 contract. Each operation has an `x-implementation` marker: only `GET /api/health` is implemented. Event and reservation operations describe subsequent tasks; they are not available yet. Session cookie details will be finalized in S1-10 and retry behavior in S2-03.
+[api/openapi.json](api/openapi.json) is the OpenAPI 3.0 contract. Each operation has an `x-implementation` marker: `GET /api/health` and `GET /api/events/{eventId}` are implemented. Reservation operations describe subsequent tasks and are not available yet. Session cookie details will be finalized in S1-10 and retry behavior in S2-03.
 
 The contract includes request/response examples, HTTP status codes, and errors. Booking requests allow one ticket and never accept client-supplied ownership. General errors use `{"error":{"code":"INVALID_REQUEST","message":"..."}}`. Health retains its existing 200/503 readiness responses; unsupported query parameters return a 400 error without accessing the database or echoing input.
 
