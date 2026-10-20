@@ -24,6 +24,10 @@ curl -i http://localhost:3000/api/health
 
 A ready database returns HTTP 200 with `{"status":"ok","database":"ready"}`. An unreachable database or missing schema returns HTTP 503 with `{"status":"unavailable","database":"unavailable"}`. Responses contain no credentials or stack traces and are never cached.
 
+The interface follows the [Ticket Studio frontend direction](FRONTEND_DIRECTION.md), using a self-hosted Space Grotesk font, warm paper surfaces, and a ticket layout. The font and its SIL Open Font License are in `src/app/fonts/`. No external font request is needed at runtime or build time.
+
+When sales are open, **Review booking** opens `/review` with fresh event details, one general-admission ticket, and a Free total. This is a read-only review: **Confirm reservation** is disabled and explained until the reservation endpoint and guest session are implemented. Neither page reserves inventory. History and confirmed-ticket screens are not enabled yet. A failed availability refresh preserves the last details with an explicit stale-data warning and blocks entry to review until a successful refresh; a not-found response clears the old event.
+
 After the first seed, `db:status` should show `live-sessions-demo`, Live Sessions (Demo), capacity 100, and remaining 100. The fictional event takes place at Demo Hall on November 21, 2026 at 19:00 (Asia/Bangkok). General admission is free, with one ticket per request. Sales run from October 1, 2026 at 07:00 to November 21, 2026 at 18:00 (Asia/Bangkok). These are fixed fixture dates; sales close when that window ends.
 
 Migrations can be run repeatedly and record which files have been applied. Seed only inserts a missing event: it never overwrites an existing event or replenishes inventory. The fixture uses 100 tickets for backlog tests; the earlier UX prototype used three tickets to make exploration quicker.
