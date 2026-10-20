@@ -3,7 +3,7 @@
   "info": {
     "title": "LastResort API",
     "version": "0.1.0",
-    "description": "S1-06 contract. Only GET /api/health is implemented. Operations marked planned are design contracts for subsequent tasks, not live endpoints. JSON uses camelCase and date-times include a timezone. The server decides sale windows, inventory and ownership. Error messages contain no stack traces, credentials or session tokens."
+    "description": "S1-06 contract. GET /api/health and GET /api/events/{eventId} are implemented. Operations marked planned are design contracts for subsequent tasks, not live endpoints. JSON uses camelCase and date-times include a timezone. The server decides sale windows, inventory and ownership. Error messages contain no stack traces, credentials or session tokens."
   },
   "servers": [
     {
@@ -78,8 +78,8 @@
       "get": {
         "operationId": "getEvent",
         "summary": "Read event details and sale status",
-        "description": "Planned for S1-08/S1-09. Sale status uses server time; opening is inclusive and closing is exclusive. Check the sale window before inventory. Displayed remaining inventory does not reserve a ticket. Remaining must not exceed capacity.",
-        "x-implementation": "planned",
+        "description": "Implemented for S1-08/S1-09. Invalid event IDs and query parameters return 400; unknown events return 404. Sale status uses server time; opening is inclusive and closing is exclusive. Check the sale window before inventory. Displayed remaining inventory does not reserve a ticket. Remaining must not exceed capacity.",
+        "x-implementation": "implemented",
         "parameters": [
           {
             "name": "eventId",
