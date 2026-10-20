@@ -1,6 +1,6 @@
 # LastResort
 
-A limited-capacity ticket booking platform. The first release has one demo event, guest sessions, and immediate confirmation. S1-05 provides the Next.js foundation, PostgreSQL 17, migrations, seed data, and a health check. Event details and booking features will follow in later tasks. The project interface, sample data, and documentation are in English.
+A limited-capacity ticket booking platform. The first release has one demo event, guest sessions, and immediate confirmation. S1-05 provides the Next.js foundation, PostgreSQL 17, migrations, seed data, and a health check. S1-06 adds API contracts and CI. Event details and booking features will follow in later tasks. The project interface, sample data, and documentation are in English.
 
 ## Run from a fresh checkout
 
@@ -85,7 +85,23 @@ docker compose exec -T db createdb -U lastresort lastresort_test_foundation
 TEST_DATABASE_URL=postgresql://lastresort:lastresort_local_demo@127.0.0.1:55432/lastresort_test_foundation npm run test:integration
 ```
 
-If the database already exists, skip `createdb`. Integration tests cover repeated migrations and seed, seed without inventory replenishment, rejected resets for production or mismatching markers or missing confirmation, confirmed reset, and preservation of tables outside the app schema. Booking correctness tests belong to S1-11 and Sprint 2. API contracts and CI belong to S1-06.
+If the database already exists, skip `createdb`. Integration tests cover repeated migrations and seed, seed without inventory replenishment, rejected resets for production or mismatching markers or missing confirmation, confirmed reset, and preservation of tables outside the app schema. Booking correctness tests belong to S1-11 and Sprint 2.
+
+## API contract and CI
+
+[api/openapi.json](api/openapi.json) is the OpenAPI 3.0 contract. Each operation has an `x-implementation` marker: only `GET /api/health` is implemented. Event and reservation operations describe subsequent tasks; they are not available yet. Session cookie details will be finalized in S1-10 and retry behavior in S2-03.
+
+The contract includes request/response examples, HTTP status codes, and errors. Booking requests allow one ticket and never accept client-supplied ownership. General errors use `{"error":{"code":"INVALID_REQUEST","message":"..."}}`. Health retains its existing 200/503 readiness responses; unsupported query parameters return a 400 error without accessing the database or echoing input.
+
+```sh
+npm run test:contract
+```
+
+Contract tests validate the OpenAPI document, its examples, booking input rules, and the actual health route's response status/body/headers with controlled database outcomes. They do not establish booking endpoint behavior before implementation. Update the contract and add route tests together when implementing each endpoint.
+
+The [CI workflow](.github/workflows/ci.yml) runs on pull requests, pushes to `main`, and manual dispatch. It installs from the lockfile, then runs typecheck, all unit/contract tests, PostgreSQL 17 integration tests, and the production build. Any failure stops the job and marks the check failed. CI uses a disposable `lastresort_test_ci` database with no production secrets. TypeScript checks provide the initial static analysis; there is no separate lint command yet.
+
+To reproduce CI locally, run the verification commands above and the integration tests with a dedicated test database. `APP_ENV` must be `test` when using a test database for database commands.
 
 ## References and inventory experiment
 
