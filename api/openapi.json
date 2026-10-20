@@ -1,0 +1,767 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "LastResort API",
+    "version": "0.1.0",
+    "description": "S1-06 contract. Only GET /api/health is implemented. Operations marked planned are design contracts for subsequent tasks, not live endpoints. JSON uses camelCase and date-times include a timezone. The server decides sale windows, inventory and ownership. Error messages contain no stack traces, credentials or session tokens."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "paths": {
+    "/api/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Check database readiness",
+        "description": "Implemented. No query parameters are accepted. Health 503 retains the S1-05 readiness shape instead of the general error envelope. Next.js also supplies HEAD/OPTIONS handling.",
+        "x-implementation": "implemented",
+        "responses": {
+          "200": {
+            "description": "Database and events table are reachable.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses are not cached.",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthReady"
+                },
+                "example": {
+                  "status": "ok",
+                  "database": "ready"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "503": {
+            "description": "Database or schema is unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses are not cached.",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthUnavailable"
+                },
+                "example": {
+                  "status": "unavailable",
+                  "database": "unavailable"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/events/{eventId}": {
+      "get": {
+        "operationId": "getEvent",
+        "summary": "Read event details and sale status",
+        "description": "Planned for S1-08/S1-09. Sale status uses server time; opening is inclusive and closing is exclusive. Check the sale window before inventory. Displayed remaining inventory does not reserve a ticket. Remaining must not exceed capacity.",
+        "x-implementation": "planned",
+        "parameters": [
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event details.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses are not cached.",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                },
+                "example": {
+                  "eventId": "live-sessions-demo",
+                  "name": "Live Sessions (Demo)",
+                  "startsAt": "2026-11-21T12:00:00Z",
+                  "venue": "Demo Hall",
+                  "ticketType": "General admission",
+                  "priceMinor": 0,
+                  "saleOpensAt": "2026-10-01T00:00:00Z",
+                  "saleClosesAt": "2026-11-21T11:00:00Z",
+                  "saleStatus": "open",
+                  "capacity": 100,
+                  "remaining": 100
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/api/reservations": {
+      "post": {
+        "operationId": "createReservation",
+        "summary": "Confirm one ticket",
+        "description": "Planned for S1-10/S1-11. The server creates a guest session if needed and determines the owner. No owner or session token is accepted in JSON. Same-origin requests only. Success is returned after the reservation and inventory commit together. Idempotency behavior is delivered in S2-03: scope the key to the owner; the same key and payload return the same reference without decrementing again; changed payload returns 409 OPERATION_CONFLICT. Keep the original key on timeout/reload. Do not create a new operation while the outcome is unknown. Cookie name, expiry and storage details will be finalized in S1-10; cookies must be HttpOnly, SameSite and Secure on HTTPS.",
+        "x-implementation": "planned",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Client-generated operation UUID, saved before sending. New booking = new key; retry = same key and payload.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "example": "2d81fc2c-05e9-42aa-9786-2edf87238565"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReservationRequest"
+              },
+              "example": {
+                "eventId": "live-sessions-demo",
+                "quantity": 1
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "A new confirmed reservation. A guest-session cookie may be set.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses are not cached.",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reservation"
+                },
+                "example": {
+                  "reference": "6bda9f21-c452-44fa-9468-f34f59159f31",
+                  "status": "confirmed",
+                  "quantity": 1,
+                  "createdAt": "2026-10-20T10:00:00Z",
+                  "event": {
+                    "eventId": "live-sessions-demo",
+                    "name": "Live Sessions (Demo)",
+                    "startsAt": "2026-11-21T12:00:00Z",
+                    "venue": "Demo Hall",
+                    "ticketType": "General admission"
+                  }
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The existing confirmed result of a retry (S2-03).",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses are not cached.",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reservation"
+                },
+                "example": {
+                  "reference": "6bda9f21-c452-44fa-9468-f34f59159f31",
+                  "status": "confirmed",
+                  "quantity": 1,
+                  "createdAt": "2026-10-20T10:00:00Z",
+                  "event": {
+                    "eventId": "live-sessions-demo",
+                    "name": "Live Sessions (Demo)",
+                    "startsAt": "2026-11-21T12:00:00Z",
+                    "venue": "Demo Hall",
+                    "ticketType": "General admission"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/BookingConflict"
+          },
+          "415": {
+            "description": "Content-Type must be application/json.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses are not cached.",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "INVALID_REQUEST",
+                    "message": "Content-Type must be application/json."
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/reservations/{reference}": {
+      "get": {
+        "operationId": "getReservation",
+        "summary": "Reopen an owned reservation",
+        "description": "Planned for S1-10/S1-12. Ownership comes only from the server-validated guest cookie. Missing/invalid session returns 401. Unknown references and cross-owner references both return 404 without revealing whether the booking exists. Reading never creates a reservation. Clearing cookies or changing browsers does not recover old bookings.",
+        "x-implementation": "planned",
+        "parameters": [
+          {
+            "name": "reference",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The existing confirmed booking for this session.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses are not cached.",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reservation"
+                },
+                "example": {
+                  "reference": "6bda9f21-c452-44fa-9468-f34f59159f31",
+                  "status": "confirmed",
+                  "quantity": 1,
+                  "createdAt": "2026-10-20T10:00:00Z",
+                  "event": {
+                    "eventId": "live-sessions-demo",
+                    "name": "Live Sessions (Demo)",
+                    "startsAt": "2026-11-21T12:00:00Z",
+                    "venue": "Demo Hall",
+                    "ticketType": "General admission"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/SessionRequired"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HealthReady": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "database"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "database": {
+            "type": "string",
+            "enum": [
+              "ready"
+            ]
+          }
+        }
+      },
+      "HealthUnavailable": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "database"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "unavailable"
+            ]
+          },
+          "database": {
+            "type": "string",
+            "enum": [
+              "unavailable"
+            ]
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "INVALID_REQUEST",
+                  "NOT_FOUND",
+                  "SESSION_REQUIRED",
+                  "SALES_NOT_OPEN",
+                  "SALES_CLOSED",
+                  "SOLD_OUT",
+                  "OPERATION_CONFLICT",
+                  "SERVICE_UNAVAILABLE",
+                  "INTERNAL_ERROR"
+                ]
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      },
+      "EventSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "eventId",
+          "name",
+          "startsAt",
+          "venue",
+          "ticketType"
+        ],
+        "properties": {
+          "eventId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "startsAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "venue": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ticketType": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "eventId",
+          "name",
+          "startsAt",
+          "venue",
+          "ticketType",
+          "priceMinor",
+          "saleOpensAt",
+          "saleClosesAt",
+          "saleStatus",
+          "capacity",
+          "remaining"
+        ],
+        "properties": {
+          "eventId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "startsAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "venue": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ticketType": {
+            "type": "string",
+            "minLength": 1
+          },
+          "priceMinor": {
+            "type": "integer",
+            "enum": [
+              0
+            ]
+          },
+          "saleOpensAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "saleClosesAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "saleStatus": {
+            "type": "string",
+            "enum": [
+              "not_open",
+              "open",
+              "closed",
+              "sold_out"
+            ]
+          },
+          "capacity": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "remaining": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ReservationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "eventId",
+          "quantity"
+        ],
+        "properties": {
+          "eventId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "quantity": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          }
+        }
+      },
+      "Reservation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reference",
+          "status",
+          "quantity",
+          "createdAt",
+          "event"
+        ],
+        "properties": {
+          "reference": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "confirmed"
+            ]
+          },
+          "quantity": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "event": {
+            "$ref": "#/components/schemas/EventSummary"
+          }
+        }
+      }
+    },
+    "responses": {
+      "InvalidRequest": {
+        "description": "The request is invalid. Do not include owner/session fields in request data.",
+        "headers": {
+          "Cache-Control": {
+            "description": "Responses are not cached.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "no-store"
+              ]
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": {
+                "code": "INVALID_REQUEST",
+                "message": "The request is invalid. Do not include owner/session fields in request data."
+              }
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "The resource does not exist or does not belong to this session.",
+        "headers": {
+          "Cache-Control": {
+            "description": "Responses are not cached.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "no-store"
+              ]
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": {
+                "code": "NOT_FOUND",
+                "message": "The resource does not exist or does not belong to this session."
+              }
+            }
+          }
+        }
+      },
+      "SessionRequired": {
+        "description": "A valid guest session is required.",
+        "headers": {
+          "Cache-Control": {
+            "description": "Responses are not cached.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "no-store"
+              ]
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": {
+                "code": "SESSION_REQUIRED",
+                "message": "A valid guest session is required."
+              }
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "The service is temporarily unavailable. A booking outcome may still be unknown; retry the same operation.",
+        "headers": {
+          "Cache-Control": {
+            "description": "Responses are not cached.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "no-store"
+              ]
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": {
+                "code": "SERVICE_UNAVAILABLE",
+                "message": "The service is temporarily unavailable. A booking outcome may still be unknown; retry the same operation."
+              }
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "The request could not be completed. No stack trace or internal details are returned.",
+        "headers": {
+          "Cache-Control": {
+            "description": "Responses are not cached.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "no-store"
+              ]
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "The request could not be completed. No stack trace or internal details are returned."
+              }
+            }
+          }
+        }
+      },
+      "BookingConflict": {
+        "description": "SALES_NOT_OPEN, SALES_CLOSED, SOLD_OUT, or OPERATION_CONFLICT. No additional entitlement is created. A committed retry is resolved before current sales/inventory checks.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": {
+                "code": "SOLD_OUT",
+                "message": "No tickets are available."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
