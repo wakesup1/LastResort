@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { createServer } from "node:net";
@@ -83,6 +83,8 @@ const config = readConfig({ APP_ENV: "test", DATABASE_URL: databaseUrl });
 const pool = new Pool({ connectionString: databaseUrl, connectionTimeoutMillis: 3000 });
 let server: ChildProcess | undefined;
 let createdTokenHash: string | undefined;
+const bookingEventId = `http-booking-${randomUUID()}`;
+let createdBookingFixture = false;
 
 try {
   const databaseState = await pool.query<{ name: string }>("SELECT current_database() AS name");
@@ -135,8 +137,55 @@ try {
   assert.equal(rejectedOrigin.status, 403, `Expected a cross-origin request to be rejected: ${rejectedOrigin.body}`);
   assert.match(rejectedOrigin.body, /ORIGIN_FORBIDDEN/);
 
-  process.stdout.write("Production-server session HTTP checks passed.\n");
+  await pool.query(
+    `INSERT INTO lastresort.events
+       (id, name, starts_at, venue, ticket_type, price_minor, sale_opens_at, sale_closes_at, capacity, remaining)
+     VALUES ($1, 'HTTP booking fixture', clock_timestamp() + interval '2 days', 'Test Hall', 'General admission',
+             0, clock_timestamp() - interval '1 day', clock_timestamp() + interval '1 day', 1, 1)`, [bookingEventId],
+  );
+  createdBookingFixture = true;
+  async function postBooking(headers: Record<string, string> = {}, extraInput: Record<string, unknown> = {}) {
+    return fetch(`${origin}/api/reservations`, {
+      method: "POST", headers: { Origin: origin, "Content-Type": "application/json", Cookie: cookie?.split(";")[0] ?? "", ...headers },
+      body: JSON.stringify({ eventId: bookingEventId, quantity: 1, ...extraInput }),
+      signal: AbortSignal.timeout(5000),
+    });
+  }
+  for (const [headers, extraInput, expectedStatus] of [
+    [{ Cookie: "" }, {}, 401],
+    [{ Origin: "http://attacker.test" }, {}, 403],
+    [{ "Idempotency-Key": randomUUID() }, {}, 400],
+    [{}, { quantity: 2 }, 400],
+    [{}, { ownerId: randomUUID() }, 400],
+  ] satisfies [Record<string, string>, Record<string, unknown>, number][]) {
+    const response = await postBooking(headers, extraInput);
+    assert.equal(response.status, expectedStatus);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+  }
+  assert.equal((await pool.query("SELECT remaining FROM lastresort.events WHERE id = $1", [bookingEventId])).rows[0].remaining, 1);
+
+  const booked = await postBooking();
+  assert.equal(booked.status, 201);
+  assert.equal(booked.headers.get("cache-control"), "no-store");
+  const booking: unknown = await booked.json();
+  assert.ok(typeof booking === "object" && booking !== null && "reference" in booking && "status" in booking);
+  assert.equal(booking.status, "confirmed");
+  const stored = await pool.query(
+    `SELECT reservation.reference, reservation.quantity FROM lastresort.reservations AS reservation
+       JOIN lastresort.guest_sessions AS owner ON owner.id = reservation.guest_session_id
+      WHERE reservation.event_id = $1 AND owner.token_hash = $2`, [bookingEventId, createdTokenHash],
+  );
+  assert.equal(stored.rows.length, 1);
+  assert.equal(stored.rows[0].reference, booking.reference);
+  assert.equal(stored.rows[0].quantity, 1);
+  assert.equal((await postBooking()).status, 409);
+  assert.equal((await pool.query("SELECT remaining FROM lastresort.events WHERE id = $1", [bookingEventId])).rows[0].remaining, 0);
+  process.stdout.write("Production-server session and atomic-booking HTTP checks passed.\n");
 } finally {
+  if (createdBookingFixture) {
+    await pool.query("DELETE FROM lastresort.reservations WHERE event_id = $1", [bookingEventId]).catch(() => {});
+    await pool.query("DELETE FROM lastresort.events WHERE id = $1", [bookingEventId]).catch(() => {});
+  }
   if (createdTokenHash) {
     await pool.query("DELETE FROM lastresort.guest_sessions WHERE token_hash = $1", [createdTokenHash]).catch(() => {});
   }
