@@ -41,7 +41,7 @@
       "get": {
         "operationId": "getHealth",
         "summary": "Check database readiness",
-        "description": "Implemented. No query parameters are accepted. Health 503 retains the S1-05 readiness shape instead of the general error envelope. Next.js also supplies HEAD/OPTIONS handling.",
+        "description": "No query parameters are accepted. Readiness probe checks required booking/session/event/operation tables and columns with one database query. Empty inventory is healthy; missing booking schema or failed connectivity returns 503. Responses retain the established readiness JSON, no-store and a server-generated X-Request-Id. Structured logs record status, outcome and duration without credentials or database errors.",
         "x-implementation": "implemented",
         "responses": {
           "200": {
@@ -54,6 +54,13 @@
                   "enum": [
                     "no-store"
                   ]
+                }
+              },
+              "X-Request-Id": {
+                "description": "Server-generated request UUID for diagnostic correlation. Incoming request IDs are not trusted.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
                 }
               }
             },
@@ -82,6 +89,13 @@
                   "enum": [
                     "no-store"
                   ]
+                }
+              },
+              "X-Request-Id": {
+                "description": "Server-generated request UUID for diagnostic correlation. Incoming request IDs are not trusted.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
                 }
               }
             },
@@ -201,6 +215,13 @@
                     "no-store"
                   ]
                 }
+              },
+              "X-Request-Id": {
+                "description": "Server-generated request UUID for diagnostic correlation. Incoming request IDs are not trusted.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
               }
             },
             "content": {
@@ -244,6 +265,13 @@
                     "no-store"
                   ]
                 }
+              },
+              "X-Request-Id": {
+                "description": "Server-generated request UUID for diagnostic correlation. Incoming request IDs are not trusted.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
               }
             },
             "content": {
@@ -272,6 +300,13 @@
                   "enum": [
                     "no-store"
                   ]
+                }
+              },
+              "X-Request-Id": {
+                "description": "Server-generated request UUID for diagnostic correlation. Incoming request IDs are not trusted.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
                 }
               }
             },
@@ -305,6 +340,13 @@
                   "enum": [
                     "no-store"
                   ]
+                }
+              },
+              "X-Request-Id": {
+                "description": "Server-generated request UUID for diagnostic correlation. Incoming request IDs are not trusted.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
                 }
               }
             },
@@ -691,6 +733,13 @@
                 "no-store"
               ]
             }
+          },
+          "X-Request-Id": {
+            "description": "Present on instrumented booking and health responses; server-generated diagnostic request UUID.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         },
         "content": {
@@ -717,6 +766,13 @@
               "enum": [
                 "no-store"
               ]
+            }
+          },
+          "X-Request-Id": {
+            "description": "Present on instrumented booking and health responses; server-generated diagnostic request UUID.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
             }
           }
         },
@@ -745,6 +801,13 @@
                 "no-store"
               ]
             }
+          },
+          "X-Request-Id": {
+            "description": "Present on instrumented booking and health responses; server-generated diagnostic request UUID.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         },
         "content": {
@@ -771,6 +834,13 @@
               "enum": [
                 "no-store"
               ]
+            }
+          },
+          "X-Request-Id": {
+            "description": "Present on instrumented booking and health responses; server-generated diagnostic request UUID.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
             }
           }
         },
@@ -799,6 +869,13 @@
                 "no-store"
               ]
             }
+          },
+          "X-Request-Id": {
+            "description": "Present on instrumented booking and health responses; server-generated diagnostic request UUID.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         },
         "content": {
@@ -825,6 +902,13 @@
               "enum": [
                 "no-store"
               ]
+            }
+          },
+          "X-Request-Id": {
+            "description": "Present on instrumented booking and health responses; server-generated diagnostic request UUID.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
             }
           }
         },
@@ -865,6 +949,13 @@
               "enum": [
                 "no-store"
               ]
+            }
+          },
+          "X-Request-Id": {
+            "description": "Present on instrumented booking and health responses; server-generated diagnostic request UUID.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
             }
           }
         }

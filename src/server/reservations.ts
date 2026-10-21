@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { QueryResultRow } from "pg";
 import { resolveGuestSession } from "./guest-session.ts";
 
@@ -47,6 +47,7 @@ export async function reserveTicket(
   cookieHeader: string | null,
   eventId: string,
   operationKey: string,
+  onOperation?: (operationId: string) => void,
 ): Promise<BookingResult> {
   await client.query("BEGIN");
   try {
@@ -57,6 +58,8 @@ export async function reserveTicket(
     }
 
     const ownerId = session.ownerId;
+    // Correlate the owner-scoped operation without exposing the owner or raw retry key.
+    onOperation?.(createHash("sha256").update(`${ownerId}:${operationKey.toLowerCase()}`).digest("hex"));
     // The unique owner/key arbitrates retries, including requests on other connections.
     // A conflicting INSERT waits for commit/rollback; a technical failure rolls back this row too.
     await client.query(

@@ -31,6 +31,15 @@ beforeAll(async () => {
 afterAll(async () => { await pool.end(); });
 
 describe("PostgreSQL foundation commands", () => {
+  it("reports unavailable when booking schema is missing even if events are readable (S2-07)", async () => {
+    await pool.query("ALTER TABLE lastresort.booking_operations RENAME TO booking_operations_unavailable_fixture");
+    try {
+      expect(await checkHealth((sql) => pool.query(sql))).toMatchObject({ status: 503 });
+    } finally {
+      await pool.query("ALTER TABLE lastresort.booking_operations_unavailable_fixture RENAME TO booking_operations");
+    }
+    expect(await checkHealth((sql) => pool.query(sql))).toMatchObject({ status: 200 });
+  });
   it("migrates repeatedly and seeds exactly one complete event", async () => {
     command("reset", "test", "--confirm-reset");
     command("migrate");

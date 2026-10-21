@@ -1,6 +1,7 @@
 import { getPool } from "../../../server/database.ts";
 import { forbiddenOrigin, invalidRequest, isSameOriginRequest } from "../../../server/http.ts";
 import { reserveTicket } from "../../../server/reservations.ts";
+import { withRequestDiagnostics, type RequestDiagnostics } from "../../../server/diagnostics.ts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,7 +48,11 @@ async function readBookingInput(request: Request): Promise<string | null> {
   }
 }
 
-export async function POST(request: Request) {
+export function POST(request: Request) {
+  return withRequestDiagnostics("reservations.create", request, (diagnostics) => createReservation(request, diagnostics));
+}
+
+async function createReservation(request: Request, diagnostics: RequestDiagnostics) {
   if (!isSameOriginRequest(request)) return forbiddenOrigin();
   if (new URL(request.url).searchParams.size > 0) {
     return invalidRequest("This endpoint does not accept query parameters.");
@@ -65,7 +70,7 @@ export async function POST(request: Request) {
   try {
     const client = await getPool().connect();
     try {
-      const result = await reserveTicket(client, request.headers.get("cookie"), eventId, operationKey.toLowerCase());
+      const result = await reserveTicket(client, request.headers.get("cookie"), eventId, operationKey.toLowerCase(), (id) => { diagnostics.operationId = id; });
       if ("reservation" in result) return Response.json(result.reservation, { status: result.replayed ? 200 : 201, headers: noStore });
       switch (result.code) {
         case "SESSION_REQUIRED": return errorResponse(401, result.code, "A valid guest session is required.");
