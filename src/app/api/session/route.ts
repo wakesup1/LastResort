@@ -1,6 +1,6 @@
 import { ensureGuestSession } from "../../../server/guest-session.ts";
 import { getPool } from "../../../server/database.ts";
-import { forbiddenOrigin, invalidRequest, isSameOriginRequest } from "../../../server/http.ts";
+import { forbiddenOrigin, getExpectedOrigin, hasRequestBody, invalidRequest, isSameOriginRequest } from "../../../server/http.ts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,11 +8,12 @@ export const dynamic = "force-dynamic";
 const noStore = { "Cache-Control": "no-store" };
 
 export async function POST(request: Request) {
-  if (!isSameOriginRequest(request)) return forbiddenOrigin();
+  const expectedOrigin = getExpectedOrigin(request);
+  if (!expectedOrigin || !isSameOriginRequest(request, expectedOrigin)) return forbiddenOrigin();
   if (new URL(request.url).searchParams.size > 0) {
     return invalidRequest("This endpoint does not accept query parameters.");
   }
-  if (request.body !== null) {
+  if (await hasRequestBody(request)) {
     return invalidRequest("This endpoint does not accept a request body.");
   }
 
@@ -20,7 +21,7 @@ export async function POST(request: Request) {
     const result = await ensureGuestSession(
       (sql, values) => getPool().query(sql, values),
       request.headers.get("cookie"),
-      new URL(request.url).protocol === "https:",
+      new URL(expectedOrigin).protocol === "https:",
     );
     const headers = new Headers(noStore);
     if (result.setCookie) headers.set("Set-Cookie", result.setCookie);

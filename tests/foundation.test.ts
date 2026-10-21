@@ -13,10 +13,15 @@ describe("configuration", () => {
   it("rejects invalid environment", () => {
     expect(() => readConfig({ APP_ENV: "typo", DATABASE_URL: "postgresql://localhost/lastresort_demo" })).toThrow("APP_ENV");
   });
+  it("accepts a canonical application origin and rejects paths", () => {
+    const config = { APP_ENV: "demo", DATABASE_URL: "postgresql://localhost/lastresort_demo" };
+    expect(readConfig({ ...config, APP_ORIGIN: "https://tickets.example" }).appOrigin).toBe("https://tickets.example");
+    expect(() => readConfig({ ...config, APP_ORIGIN: "https://tickets.example/path" })).toThrow("Invalid configuration: APP_ORIGIN");
+  });
 });
 
 describe("disposable data guard", () => {
-  const config = { appEnv: "demo" as const, databaseUrl: "postgresql://localhost/lastresort_demo" };
+  const config = { appEnv: "demo" as const, databaseUrl: "postgresql://localhost/lastresort_demo", appOrigin: null };
   it("allows matching demo and test databases", () => {
     expect(() => assertDisposableDatabase(config, "lastresort_demo", "demo")).not.toThrow();
     expect(() => assertDisposableDatabase({ ...config, appEnv: "test" }, "lastresort_test_ci", "test")).not.toThrow();

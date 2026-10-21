@@ -44,6 +44,7 @@ The app and database commands load `.env.local` through Next.js. Process environ
 | --- | --- |
 | `APP_ENV` | `demo`, `test`, or `production`; identifies the data environment separately from Next.js's `NODE_ENV` |
 | `DATABASE_URL` | PostgreSQL connection URL including the database name |
+| `APP_ORIGIN` | Optional canonical `http://` or `https://` origin, without a path. Set it when a reverse proxy changes the request host or scheme; forwarded host headers are not trusted. |
 
 The example credentials are for the local container only. Port 55432 is bound to loopback. Do not use these credentials for an online service. Keep real configuration in `.env.local` or hosting environment variables. All `.env*` files except `.env.example` are ignored. Never put database credentials in `NEXT_PUBLIC_` variables.
 
@@ -91,7 +92,7 @@ docker compose exec -T db createdb -U lastresort lastresort_test_foundation
 TEST_DATABASE_URL=postgresql://lastresort:lastresort_local_demo@127.0.0.1:55432/lastresort_test_foundation npm run test:integration
 ```
 
-If the database already exists, skip `createdb`. Integration tests cover repeated migrations and seed, seed without inventory replenishment, guest-session persistence and expiry, rejected resets for production or mismatching markers or missing confirmation, confirmed reset, and preservation of tables outside the app schema. Booking correctness tests belong to S1-11 and Sprint 2.
+If the database already exists, skip `createdb`. Integration tests cover repeated migrations and seed, seed without inventory replenishment, guest-session persistence and expiry, rejected resets for production or mismatching markers or missing confirmation, confirmed reset, and preservation of tables outside the app schema. Booking correctness tests belong to S1-11 and Sprint 2. After building, `npm run test:http` starts the production server against `TEST_DATABASE_URL` to verify bodyless, nonempty-body, and cross-origin session requests. It refuses databases without a matching `lastresort_test...` name and test marker.
 
 ## API contract and CI
 
@@ -105,7 +106,7 @@ npm run test:contract
 
 Contract tests validate the OpenAPI document, its examples, booking input rules, and the actual health route's response status/body/headers with controlled database outcomes. Guest-session tests cover cookie creation/reuse, token hashing, expiry, origin checks, and safe errors. Reservation endpoint behavior remains unimplemented; update the contract and add route tests together when implementing each endpoint.
 
-The [CI workflow](.github/workflows/ci.yml) runs on pull requests, pushes to `main`, and manual dispatch. It installs from the lockfile, then runs typecheck, all unit/contract tests, PostgreSQL 17 integration tests, and the production build. Any failure stops the job and marks the check failed. CI uses a disposable `lastresort_test_ci` database with no production secrets. TypeScript checks provide the initial static analysis; there is no separate lint command yet.
+The [CI workflow](.github/workflows/ci.yml) runs on pull requests, pushes to `main`, and manual dispatch. It installs from the lockfile, then runs typecheck, all unit/contract tests, PostgreSQL 17 integration tests, the production build, and the production-server HTTP regression checks. Any failure stops the job and marks the check failed. CI uses a disposable `lastresort_test_ci` database with no production secrets. TypeScript checks provide the initial static analysis; there is no separate lint command yet.
 
 To reproduce CI locally, run the verification commands above and the integration tests with a dedicated test database. `APP_ENV` must be `test` when using a test database for database commands.
 

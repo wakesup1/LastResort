@@ -7,6 +7,7 @@ import {
   GUEST_SESSION_TTL_SECONDS,
   resolveGuestSession,
 } from "../src/server/guest-session.ts";
+import { getExpectedOrigin, hasRequestBody, isSameOriginRequest } from "../src/server/http.ts";
 
 const { query } = vi.hoisted(() => ({ query: vi.fn() }));
 vi.mock("../src/server/database.ts", () => ({ getPool: () => ({ query }) }));
@@ -56,6 +57,59 @@ describe("guest session helpers", () => {
     expect(await resolveGuestSession(query, `${GUEST_SESSION_COOKIE_NAME}=forged`)).toBeNull();
     expect(await resolveGuestSession(query, `${GUEST_SESSION_COOKIE_NAME}=${TOKEN}; ${GUEST_SESSION_COOKIE_NAME}=${TOKEN}`)).toBeNull();
     expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe("HTTP request checks", () => {
+  it("uses the direct Host header and ignores forwarded host headers", () => {
+    const request = new Request("http://localhost:3108/api/session", {
+      method: "POST",
+      headers: {
+        Host: "127.0.0.1:3108",
+        Origin: "http://127.0.0.1:3108",
+        "X-Forwarded-Host": "attacker.test",
+      },
+    });
+
+    expect(getExpectedOrigin(request)).toBe("http://127.0.0.1:3108");
+    expect(isSameOriginRequest(request)).toBe(true);
+    expect(isSameOriginRequest(new Request(request.url, {
+      method: "POST",
+      headers: { Host: "127.0.0.1:3108", Origin: "http://attacker.test", "X-Forwarded-Host": "attacker.test" },
+    }))).toBe(false);
+  });
+
+  it("uses the configured public origin when a proxy changes the internal host", () => {
+    const request = new Request("http://next-internal:3000/api/session", {
+      method: "POST",
+      headers: { Host: "next-internal:3000", Origin: "https://tickets.example", "X-Forwarded-Host": "attacker.test" },
+    });
+
+    expect(isSameOriginRequest(request, "https://tickets.example")).toBe(true);
+    expect(isSameOriginRequest(request, "https://other.example")).toBe(false);
+  });
+
+  it("accepts a zero-byte stream and rejects a streamed body without buffering it all", async () => {
+    const emptyBody = new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
+    const bodyRequest = (body: ReadableStream<Uint8Array>) => {
+      const init: RequestInit & { duplex: "half" } = {
+        method: "POST",
+        headers: { Origin: "https://example.test", "Content-Length": "0" },
+        body,
+        duplex: "half",
+      };
+      return new Request("https://example.test/api/session", init);
+    };
+
+    expect(await hasRequestBody(bodyRequest(emptyBody))).toBe(false);
+
+    const nonemptyBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1]));
+        controller.close();
+      },
+    });
+    expect(await hasRequestBody(bodyRequest(nonemptyBody))).toBe(true);
   });
 });
 

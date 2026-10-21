@@ -7,6 +7,7 @@ import { createGuestSession, GUEST_SESSION_COOKIE_NAME, resolveGuestSession } fr
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("Missing configuration: TEST_DATABASE_URL (dedicated lastresort_test database required)");
+const testConfig = { appEnv: "test" as const, databaseUrl, appOrigin: null };
 const pool = new Pool({ connectionString: databaseUrl, connectionTimeoutMillis: 3000 });
 
 function command(action: string, appEnv = "test", ...args: string[]) {
@@ -18,11 +19,11 @@ function command(action: string, appEnv = "test", ...args: string[]) {
 
 beforeAll(async () => {
   const result = await pool.query("SELECT current_database() AS name");
-  assertDisposableDatabase({ appEnv: "test", databaseUrl: databaseUrl! }, result.rows[0].name);
+  assertDisposableDatabase(testConfig, result.rows[0].name);
   command("migrate");
   const marker = await pool.query("SELECT name FROM lastresort.environment WHERE id=1");
   if (!marker.rows[0]) throw new Error("Missing database environment marker");
-  assertDisposableDatabase({ appEnv: "test", databaseUrl: databaseUrl! }, result.rows[0].name, marker.rows[0].name);
+  assertDisposableDatabase(testConfig, result.rows[0].name, marker.rows[0].name);
 });
 afterAll(async () => { await pool.end(); });
 
@@ -85,7 +86,12 @@ describe("PostgreSQL foundation commands", () => {
     expect(hashes.rows.map((row: { token_hash: string }) => row.token_hash)).not.toContain(firstToken);
     expect(hashes.rows.map((row: { token_hash: string }) => row.token_hash)).not.toContain(secondToken);
 
-    await pool.query("UPDATE lastresort.guest_sessions SET expires_at = now() - interval '1 second' WHERE id = $1", [first.session.ownerId]);
+    await pool.query(
+      `UPDATE lastresort.guest_sessions
+          SET created_at = now() - interval '2 seconds', expires_at = now() - interval '1 second'
+        WHERE id = $1`,
+      [first.session.ownerId],
+    );
     expect(await resolveGuestSession(query, `${GUEST_SESSION_COOKIE_NAME}=${firstToken}`)).toBeNull();
     expect(await resolveGuestSession(query, `${GUEST_SESSION_COOKIE_NAME}=${secondToken}`)).toEqual(second.session);
   });

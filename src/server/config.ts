@@ -1,5 +1,5 @@
 export type AppEnvironment = "demo" | "test" | "production";
-export type Config = { appEnv: AppEnvironment; databaseUrl: string };
+export type Config = { appEnv: AppEnvironment; databaseUrl: string; appOrigin: string | null };
 
 export class ConfigError extends Error {}
 
@@ -17,7 +17,18 @@ export function readConfig(env: Record<string, string | undefined> = process.env
   } catch {
     throw new ConfigError("Invalid configuration: DATABASE_URL");
   }
-  return { appEnv: env.APP_ENV as AppEnvironment, databaseUrl: env.DATABASE_URL! };
+
+  const appOrigin = env.APP_ORIGIN?.trim() || null;
+  if (appOrigin) {
+    try {
+      const url = new URL(appOrigin);
+      if (!["http:", "https:"].includes(url.protocol) || url.origin !== appOrigin) throw new Error();
+    } catch {
+      throw new ConfigError("Invalid configuration: APP_ORIGIN");
+    }
+  }
+
+  return { appEnv: env.APP_ENV as AppEnvironment, databaseUrl: env.DATABASE_URL!, appOrigin };
 }
 
 export function assertDisposableDatabase(config: Config, database: string, marker?: string) {
