@@ -36,7 +36,7 @@ const rejectionMessages: Record<string, string> = {
   ORIGIN_FORBIDDEN: "The booking request was rejected. No ticket was reserved.",
 };
 
-// This browser guard is not server idempotency. An uncertain POST is never retried.
+// Persist the key before sending. Unknown outcomes stay blocked until explicit recovery is implemented.
 export function createBookingController(storage: Pick<Storage, "getItem" | "setItem" | "removeItem">, send: typeof fetch = fetch) {
   let sending = false;
   function restore(): BookingState {
@@ -58,17 +58,17 @@ export function createBookingController(storage: Pick<Storage, "getItem" | "setI
       sending = true;
       let reservationSent = false;
       try {
-        const operation = { operationId: crypto.randomUUID(), eventId };
+        const operation = { operationId: crypto.randomUUID(), eventId, protocol: "idempotent-v1" };
         storage.setItem(BOOKING_STORAGE_KEY, JSON.stringify(operation));
         const session = await send("/api/session", { method: "POST", signal: AbortSignal.timeout(10000) });
         if (!session.ok) throw new Error("Session unavailable");
         reservationSent = true;
         const response = await send("/api/reservations", {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": operation.operationId },
           body: JSON.stringify({ eventId, quantity: 1 }), signal: AbortSignal.timeout(10000),
         });
         const payload: unknown = await response.json();
-        if (response.status === 201 && isReservation(payload) && payload.event.eventId === eventId) {
+        if ([200, 201].includes(response.status) && isReservation(payload) && payload.event.eventId === eventId) {
           // If saving fails, keep the pre-send marker to block an uncertain resubmit.
           try { storage.setItem(BOOKING_STORAGE_KEY, JSON.stringify({ ...operation, reference: payload.reference })); } catch {}
           return { kind: "confirmed", reference: payload.reference };

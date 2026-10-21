@@ -12,8 +12,10 @@ describe("browser booking submission guard", () => {
     const saved = storage();
     let complete: ((response: Response) => void) | undefined;
     const pending = new Promise<Response>((resolve) => { complete = resolve; });
-    const send = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null, { status: 204 })).mockImplementationOnce(async () => {
-      expect(saved.getItem(BOOKING_STORAGE_KEY)).toContain("operationId");
+    const send = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null, { status: 204 })).mockImplementationOnce(async (_url, options) => {
+      const operation = JSON.parse(saved.getItem(BOOKING_STORAGE_KEY) ?? "{}");
+      expect(options?.headers).toMatchObject({ "Idempotency-Key": operation.operationId });
+      expect(operation.protocol).toBe("idempotent-v1");
       return pending;
     });
     const booking = createBookingController(saved, send);
@@ -24,6 +26,17 @@ describe("browser booking submission guard", () => {
     expect(await first).toEqual({ kind: "confirmed", reference });
     expect(await createBookingController(saved, send).confirm("live-sessions-demo")).toEqual({ kind: "confirmed", reference });
     expect(send).toHaveBeenCalledTimes(2);
+  });
+  it("accepts an original confirmed result replayed with HTTP 200", async () => {
+    const saved = storage();
+    const send = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null, { status: 204 })).mockResolvedValueOnce(Response.json(reservation));
+    expect(await createBookingController(saved, send).confirm("live-sessions-demo")).toEqual({ kind: "confirmed", reference });
+  });
+  it("retains the original operation on a payload conflict without claiming no ticket exists", async () => {
+    const saved = storage();
+    const send = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null, { status: 204 })).mockResolvedValueOnce(Response.json({ error: { code: "OPERATION_CONFLICT" } }, { status: 409 }));
+    expect(await createBookingController(saved, send).confirm("live-sessions-demo")).toEqual({ kind: "unknown" });
+    expect(saved.getItem(BOOKING_STORAGE_KEY)).toContain("operationId");
   });
   it.each(["lost-response", "503", "invalid-success"])("keeps an uncertain operation blocked after %s and reload", async (failure) => {
     const saved = storage();
