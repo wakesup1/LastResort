@@ -173,7 +173,7 @@
       "post": {
         "operationId": "createReservation",
         "summary": "Confirm one ticket",
-        "description": "S1-11 atomic booking API. Establish a guest session first with POST /api/session; missing, invalid or expired sessions return 401. The owner comes only from the server-validated cookie. No owner/session data is accepted in JSON. Same-origin requests only. Accepts application/json with exactly eventId and quantity: 1, up to 1024 bytes, and no query parameters. A row lock and conditional update check database time after any lock wait; the reservation and inventory commit together before a 201 response. Each accepted POST is a new booking. Retry/idempotency support belongs to S2-03 and is not implemented: Idempotency-Key is currently rejected with 400 before database access. The S1-12 browser flow persists a submission guard before sending and blocks repeat clicks and uncertain resubmission across reloads. Do not retry an unknown outcome. GET /api/reservations/{reference} reopens an owned known result; lost-response discovery remains future work.",
+        "description": "Same-origin requests only. Establish a guest session first with POST /api/session. Owner identity comes only from the validated cookie. Requires a UUID Idempotency-Key and exactly eventId and quantity: 1 in JSON (maximum 1024 bytes), without query parameters. Keys are scoped to the guest owner and are retained without automatic expiry/reuse. The normalized payload is the exact validated eventId and integer quantity 1; JSON whitespace/property order and UUID letter case do not change the operation. Concurrent same-owner/key requests wait on a database uniqueness constraint; a statement timeout returns 503 and remains retryable with the same key and original session. A first successful commit returns 201, a successful replay returns 200 with the original persisted result before checking current inventory or sale windows. NOT_FOUND, SALES_NOT_OPEN, SALES_CLOSED and SOLD_OUT are persisted terminal business results and replay with their original status/code. Same key with a different valid payload returns 409 OPERATION_CONFLICT. Invalid input, invalid sessions and uncommitted technical failures are not stored as terminal results. Another owner has an independent key scope and cannot read the original result. The browser saves and sends its operation key; unknown outcomes remain guarded until explicit recovery UI in S2-06. Never change keys to recover an unknown outcome.",
         "x-implementation": "implemented",
         "requestBody": {
           "required": true,
@@ -264,7 +264,7 @@
             "$ref": "#/components/responses/InternalError"
           },
           "503": {
-            "description": "The booking outcome could not be confirmed. A commit response may have been lost; do not submit another booking. Result discovery and retry support are future work.",
+            "description": "The outcome may be unknown. Retry only the same key and payload with the original session. Technical failures that did not commit leave no operation or inventory writes.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -283,7 +283,7 @@
                 "example": {
                   "error": {
                     "code": "SERVICE_UNAVAILABLE",
-                    "message": "The booking outcome could not be confirmed. Do not submit another booking."
+                    "message": "The booking outcome could not be confirmed. Retry only the same operation key and payload with the original session."
                   }
                 }
               }
@@ -294,12 +294,58 @@
           },
           "403": {
             "$ref": "#/components/responses/OriginForbidden"
+          },
+          "200": {
+            "description": "Original confirmed result replayed for the same guest owner, key and normalized payload; no additional inventory decrement.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses are not cached.",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reservation"
+                },
+                "example": {
+                  "reference": "6bda9f21-c452-44fa-9468-f34f59159f31",
+                  "status": "confirmed",
+                  "quantity": 1,
+                  "createdAt": "2026-10-20T10:00:00Z",
+                  "event": {
+                    "eventId": "live-sessions-demo",
+                    "name": "Live Sessions (Demo)",
+                    "startsAt": "2026-11-21T12:00:00Z",
+                    "venue": "Demo Hall",
+                    "ticketType": "General admission"
+                  }
+                }
+              }
+            }
           }
         },
-        "x-planned-idempotency": "S2-03 will introduce a required owner-scoped Idempotency-Key UUID, persistent replay (200) and OPERATION_CONFLICT for a changed payload. Not accepted in S1-11.",
         "security": [
           {
             "guestSessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "example": "7b013fc7-c29f-428e-98ea-04cbe234e917",
+            "description": "One stable UUID per deliberate booking operation, scoped to the original guest session. Reuse only with the same payload."
           }
         ]
       }
@@ -797,7 +843,7 @@
         }
       },
       "BookingConflict": {
-        "description": "SALES_NOT_OPEN, SALES_CLOSED, or SOLD_OUT. No entitlement is created and inventory is unchanged. OPERATION_CONFLICT and replay before current sale checks belong to S2-03.",
+        "description": "SALES_NOT_OPEN, SALES_CLOSED and SOLD_OUT are retained terminal outcomes for this operation. OPERATION_CONFLICT means the owner reused a key with a different valid payload; the original operation is unchanged. A new operation is never created to resolve this conflict.",
         "content": {
           "application/json": {
             "schema": {

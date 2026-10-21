@@ -10,8 +10,9 @@ export type Reservation = {
   event: { eventId: string; name: string; startsAt: string; venue: string; ticketType: string };
 };
 
-type FailureCode = "SESSION_REQUIRED" | "NOT_FOUND" | "SALES_NOT_OPEN" | "SALES_CLOSED" | "SOLD_OUT";
-export type BookingResult = { reservation: Reservation } | { code: FailureCode };
+type FailureCode = "SESSION_REQUIRED" | "NOT_FOUND" | "SALES_NOT_OPEN" | "SALES_CLOSED" | "SOLD_OUT" | "OPERATION_CONFLICT";
+type BookingOutcome = { reservation: Reservation } | { code: FailureCode };
+export type BookingResult = BookingOutcome & { replayed?: boolean };
 type EventRow = { id: string; name: string; starts_at: Date; venue: string; ticket_type: string };
 type BookingClient = {
   query<Row extends QueryResultRow = QueryResultRow>(sql: string, values?: string[]): Promise<{ rows: Row[] }>;
@@ -45,6 +46,7 @@ export async function reserveTicket(
   client: BookingClient,
   cookieHeader: string | null,
   eventId: string,
+  operationKey: string,
 ): Promise<BookingResult> {
   await client.query("BEGIN");
   try {
@@ -54,12 +56,44 @@ export async function reserveTicket(
       return { code: "SESSION_REQUIRED" };
     }
 
+    const ownerId = session.ownerId;
+    // The unique owner/key arbitrates retries, including requests on other connections.
+    // A conflicting INSERT waits for commit/rollback; a technical failure rolls back this row too.
+    await client.query(
+      `INSERT INTO lastresort.booking_operations (guest_session_id, operation_key, event_id, quantity)
+       VALUES ($1, $2, $3, 1) ON CONFLICT (guest_session_id, operation_key) DO NOTHING`,
+      [ownerId, operationKey, eventId],
+    );
+    const operation = await client.query<{ event_id: string; response: BookingOutcome | null }>(
+      `SELECT event_id, response FROM lastresort.booking_operations
+        WHERE guest_session_id = $1 AND operation_key = $2 FOR UPDATE`,
+      [ownerId, operationKey],
+    );
+    const saved = operation.rows[0];
+    if (!saved) throw new Error("Booking operation was not recorded.");
+    if (saved.event_id !== eventId) {
+      await client.query("ROLLBACK");
+      return { code: "OPERATION_CONFLICT" };
+    }
+    if (saved.response) {
+      await client.query("COMMIT");
+      return { ...saved.response, replayed: true };
+    }
+    async function finish(outcome: BookingOutcome): Promise<BookingResult> {
+      await client.query(
+        `UPDATE lastresort.booking_operations SET response = $3::jsonb
+          WHERE guest_session_id = $1 AND operation_key = $2`,
+        [ownerId, operationKey, JSON.stringify(outcome)],
+      );
+      await client.query("COMMIT");
+      return outcome;
+    }
+
     const locked = await client.query<{ id: string }>(
       "SELECT id FROM lastresort.events WHERE id = $1 FOR UPDATE", [eventId],
     );
     if (!locked.rows[0]) {
-      await client.query("ROLLBACK");
-      return { code: "NOT_FOUND" };
+      return await finish({ code: "NOT_FOUND" });
     }
 
     // Evaluate the database clock AFTER any lock wait, once for both boundaries.
@@ -83,15 +117,14 @@ export async function reserveTicket(
            FROM lastresort.events WHERE id = $1`,
         [eventId],
       );
-      await client.query("ROLLBACK");
-      return { code: failure.rows[0]?.code ?? "NOT_FOUND" };
+      return await finish({ code: failure.rows[0]?.code ?? "NOT_FOUND" });
     }
 
     const inserted = await client.query<{ reference: string; created_at: Date }>(
       `INSERT INTO lastresort.reservations
          (reference, guest_session_id, event_id, quantity, status)
        VALUES ($1, $2, $3, 1, 'confirmed') RETURNING reference, created_at`,
-      [randomUUID(), session.ownerId, eventId],
+      [randomUUID(), ownerId, eventId],
     );
     const row = inserted.rows[0];
     if (!row) throw new Error("Reservation was not created.");
@@ -108,8 +141,7 @@ export async function reserveTicket(
         ticketType: event.ticket_type,
       },
     };
-    await client.query("COMMIT");
-    return { reservation };
+    return await finish({ reservation });
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
     throw error;

@@ -54,7 +54,7 @@ async function main() {
         if (action === "reset") {
           if (process.argv[3] !== "--confirm-reset") throw new Error("Reset requires --confirm-reset (test/demo data only).");
           // Explicit table list: never DROP schemas or TRUNCATE ... CASCADE.
-          await client.query("TRUNCATE TABLE lastresort.reservations, lastresort.guest_sessions, lastresort.events");
+          await client.query("TRUNCATE TABLE lastresort.booking_operations, lastresort.reservations, lastresort.guest_sessions, lastresort.events");
         }
         await seed(client);
       }

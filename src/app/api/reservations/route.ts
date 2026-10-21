@@ -8,6 +8,7 @@ export const dynamic = "force-dynamic";
 const noStore = { "Cache-Control": "no-store" };
 const EVENT_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_BODY_BYTES = 1024;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function errorResponse(status: number, code: string, message: string) {
   return Response.json({ error: { code, message } }, { status, headers: noStore });
@@ -51,9 +52,9 @@ export async function POST(request: Request) {
   if (new URL(request.url).searchParams.size > 0) {
     return invalidRequest("This endpoint does not accept query parameters.");
   }
-  // Never silently accept a retry key before persistent replay is implemented.
-  if (request.headers.has("Idempotency-Key")) {
-    return invalidRequest("Idempotency-Key is not supported until S2-03. No reservation was attempted.");
+  const operationKey = request.headers.get("Idempotency-Key");
+  if (!operationKey || !UUID_PATTERN.test(operationKey)) {
+    return invalidRequest("Provide one UUID Idempotency-Key for this booking operation.");
   }
   if (request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json") {
     return errorResponse(415, "INVALID_REQUEST", "Content-Type must be application/json.");
@@ -64,19 +65,20 @@ export async function POST(request: Request) {
   try {
     const client = await getPool().connect();
     try {
-      const result = await reserveTicket(client, request.headers.get("cookie"), eventId);
-      if ("reservation" in result) return Response.json(result.reservation, { status: 201, headers: noStore });
+      const result = await reserveTicket(client, request.headers.get("cookie"), eventId, operationKey.toLowerCase());
+      if ("reservation" in result) return Response.json(result.reservation, { status: result.replayed ? 200 : 201, headers: noStore });
       switch (result.code) {
         case "SESSION_REQUIRED": return errorResponse(401, result.code, "A valid guest session is required.");
         case "NOT_FOUND": return errorResponse(404, result.code, "The requested event was not found.");
         case "SALES_NOT_OPEN": return errorResponse(409, result.code, "Ticket sales have not opened yet.");
         case "SALES_CLOSED": return errorResponse(409, result.code, "Ticket sales have closed.");
         case "SOLD_OUT": return errorResponse(409, result.code, "No tickets are available.");
+        case "OPERATION_CONFLICT": return errorResponse(409, result.code, "This operation key was already used with a different booking payload.");
       }
     } finally {
       client.release();
     }
   } catch {
-    return errorResponse(503, "SERVICE_UNAVAILABLE", "The booking outcome could not be confirmed. Do not submit another booking.");
+    return errorResponse(503, "SERVICE_UNAVAILABLE", "The booking outcome could not be confirmed. Retry only the same operation key and payload with the original session.");
   }
 }
