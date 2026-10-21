@@ -93,14 +93,26 @@ Build and start require the example configuration. Building the event page does 
 
 The typecheck command generates Next.js types before checking TypeScript, including on a fresh clone. Generated types, build output, local configuration, test reports, and the local `docs/` directory are ignored by Git. Keep the dependency lockfile, safe environment example, migrations, and tests in version control.
 
-Run database integration tests in a dedicated, disposable database for this suite. Do not use an active demo or production database:
+Run database integration tests in a dedicated, disposable PostgreSQL 17 database for this suite. Do not use an active demo or production database. For Neon, create a separate empty database such as `lastresort_test_concurrency` and use its **direct (unpooled)** connection URL as `TEST_DATABASE_URL`, with TLS enabled. The lock-observation tests require stable backend connections; use the direct URL from Neon's connection dialog. Keep the demo's `DATABASE_URL` unchanged. The suite passes the test URL to its migration/reset subprocesses and checks both the actual database name and persisted test environment marker before fixtures run.
+
+With the optional local Compose database, create the separate test database this way:
 
 ```sh
 docker compose exec -T db createdb -U lastresort lastresort_test_foundation
 TEST_DATABASE_URL=postgresql://lastresort:lastresort_local_demo@127.0.0.1:55432/lastresort_test_foundation npm run test:integration
 ```
 
-If the database already exists, skip `createdb`. Integration tests cover repeated migrations and seed, seed without inventory replenishment, guest-session persistence and expiry, rejected resets for production or mismatching markers or missing confirmation, confirmed reset including reservations, and preservation of tables outside the app schema. S1-11 tests verify persisted ownership, two overlapping connections contending for one ticket with an observed database lock wait, rollback after a database-triggered insert failure, inventory/schema constraints, rejected sessions/events/sale windows, and sale closure during a lock wait. Exact opening/closing boundaries use the application's SQL on PostgreSQL with a controlled test-only clock. Wider concurrent workloads, retry replay and recovery remain Sprint 2 work.
+If the database already exists, skip `createdb` only if it is still dedicated and disposable. On Neon or another PostgreSQL 17 host, run `TEST_DATABASE_URL='<dedicated-direct-test-url>' npm run test:integration` instead; Docker is not required. Never commit connection strings. The suite resets test data and changes test environment markers to exercise safety guards.
+
+Integration tests cover repeated migrations and seed, seed without inventory replenishment, guest-session persistence and expiry, rejected resets for production or mismatching markers or missing confirmation, confirmed reset including reservations, and preservation of tables outside the app schema. S1-11 tests verify persisted ownership, rollback after a database-triggered insert failure, inventory/schema constraints, rejected sessions/events/sale windows, and sale closure during a lock wait. Exact opening/closing boundaries use the application's SQL on PostgreSQL with a controlled test-only clock.
+
+S2-01 expands concurrent-booking verification using the application's actual `reserveTicket` transaction:
+
+- Two distinct guest owners contend for the last ticket on separate backend connections. Both must be observed waiting for database locks before the test releases its gate. Exactly one succeeds, the other receives `SOLD_OUT`, and the stored reference belongs to the winning owner.
+- Capacity 100 receives 200 distinct operations, each with its own guest owner, through 20 worker connections (10 operations per worker). All 20 first operations must be observed waiting for database locks before release. Exactly 100 confirmations and 100 `SOLD_OUT` results are required, with 100 unique references matching the committed owners, quantities and statuses.
+- An independent observer reads inventory and reservation count in one SQL snapshot after every operation. All 200 observations must satisfy `0 <= remaining <= capacity`, `confirmed <= capacity`, and `remaining + confirmed = capacity`. The final committed state must be remaining 0 and confirmed 100.
+
+To focus on these cases after the suite has migrated a dedicated test database, run `TEST_DATABASE_URL='<dedicated-direct-test-url>' npm run test:integration -- -t 'last ticket|S2-01'`. This is transaction correctness evidence with at most 20 simultaneous booking operations, not a 200-connection HTTP load test or a performance benchmark. Retry replay, repeat-run/failure-artifact tooling, and recovery remain separate Sprint 2 tasks. The existing CI integration step runs these tests against PostgreSQL 17 without a new job or dependency.
 
 After building, run `TEST_DATABASE_URL=<your-disposable-test-url> npm run test:http`. This starts the production server against that database to verify bodyless, nonempty-body, and cross-origin session requests plus real booking HTTP success, sold-out, invalid input, ownership rejection and origin/session defenses. It also reopens the same booking twice, compares the original response, checks missing/cross-owner sessions and indistinguishable unknown references, and verifies reads create no additional reservations. It checks the persisted reservation and inventory and cleans up its own fixtures. It refuses databases without a matching `lastresort_test...` name and test marker. The CI verification job runs these same checks.
 
