@@ -173,21 +173,8 @@
       "post": {
         "operationId": "createReservation",
         "summary": "Confirm one ticket",
-        "description": "Planned for S1-11. The server creates a guest session if needed and determines the owner. No owner or session token is accepted in JSON. Same-origin requests only. Success is returned after the reservation and inventory commit together. Idempotency behavior is delivered in S2-03: scope the key to the owner; the same key and payload return the same reference without decrementing again; changed payload returns 409 OPERATION_CONFLICT. Keep the original key on timeout/reload. Do not create a new operation while the outcome is unknown. The lastresort_guest cookie is HttpOnly, SameSite=Lax, Path=/, expires after 30 days, and is Secure over HTTPS; only its SHA-256 hash is stored.",
-        "x-implementation": "planned",
-        "parameters": [
-          {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "description": "Client-generated operation UUID, saved before sending. New booking = new key; retry = same key and payload.",
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "example": "2d81fc2c-05e9-42aa-9786-2edf87238565"
-          }
-        ],
+        "description": "S1-11 atomic booking API. Establish a guest session first with POST /api/session; missing, invalid or expired sessions return 401. The owner comes only from the server-validated cookie. No owner/session data is accepted in JSON. Same-origin requests only. Accepts application/json with exactly eventId and quantity: 1, up to 1024 bytes, and no query parameters. A row lock and conditional update check database time after any lock wait; the reservation and inventory commit together before a 201 response. Each accepted POST is a new booking. Retry/idempotency support belongs to S2-03 and is not implemented: Idempotency-Key is currently rejected with 400 before database access. Do not retry an unknown outcome or expose the booking action in the UI before recovery is implemented. Reopening a result belongs to S1-12.",
+        "x-implementation": "implemented",
         "requestBody": {
           "required": true,
           "content": {
@@ -204,41 +191,7 @@
         },
         "responses": {
           "201": {
-            "description": "A new confirmed reservation. A guest-session cookie may be set.",
-            "headers": {
-              "Cache-Control": {
-                "description": "Responses are not cached.",
-                "schema": {
-                  "type": "string",
-                  "enum": [
-                    "no-store"
-                  ]
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Reservation"
-                },
-                "example": {
-                  "reference": "6bda9f21-c452-44fa-9468-f34f59159f31",
-                  "status": "confirmed",
-                  "quantity": 1,
-                  "createdAt": "2026-10-20T10:00:00Z",
-                  "event": {
-                    "eventId": "live-sessions-demo",
-                    "name": "Live Sessions (Demo)",
-                    "startsAt": "2026-11-21T12:00:00Z",
-                    "venue": "Demo Hall",
-                    "ticketType": "General admission"
-                  }
-                }
-              }
-            }
-          },
-          "200": {
-            "description": "The existing confirmed result of a retry (S2-03).",
+            "description": "A new confirmed one-ticket reservation, returned only after commit. Requires an established guest session; no cookie is created here.",
             "headers": {
               "Cache-Control": {
                 "description": "Responses are not cached.",
@@ -311,9 +264,44 @@
             "$ref": "#/components/responses/InternalError"
           },
           "503": {
-            "$ref": "#/components/responses/Unavailable"
+            "description": "The booking outcome could not be confirmed. A commit response may have been lost; do not submit another booking. Result discovery and retry support are future work.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "SERVICE_UNAVAILABLE",
+                    "message": "The booking outcome could not be confirmed. Do not submit another booking."
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/SessionRequired"
+          },
+          "403": {
+            "$ref": "#/components/responses/OriginForbidden"
           }
-        }
+        },
+        "x-planned-idempotency": "S2-03 will introduce a required owner-scoped Idempotency-Key UUID, persistent replay (200) and OPERATION_CONFLICT for a changed payload. Not accepted in S1-11.",
+        "security": [
+          {
+            "guestSessionCookie": []
+          }
+        ]
       }
     },
     "/api/reservations/{reference}": {
@@ -809,7 +797,7 @@
         }
       },
       "BookingConflict": {
-        "description": "SALES_NOT_OPEN, SALES_CLOSED, SOLD_OUT, or OPERATION_CONFLICT. No additional entitlement is created. A committed retry is resolved before current sales/inventory checks.",
+        "description": "SALES_NOT_OPEN, SALES_CLOSED, or SOLD_OUT. No entitlement is created and inventory is unchanged. OPERATION_CONFLICT and replay before current sale checks belong to S2-03.",
         "content": {
           "application/json": {
             "schema": {
@@ -820,6 +808,17 @@
                 "code": "SOLD_OUT",
                 "message": "No tickets are available."
               }
+            }
+          }
+        },
+        "headers": {
+          "Cache-Control": {
+            "description": "Responses are not cached.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "no-store"
+              ]
             }
           }
         }
