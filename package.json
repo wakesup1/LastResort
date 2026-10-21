@@ -13,7 +13,7 @@
     "prestart": "tsx scripts/check-config.ts",
     "start": "next start",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "vitest run tests/foundation.test.ts tests/api-contract.test.ts tests/events.test.ts tests/event-presentation.test.ts tests/guest-session.test.ts tests/reservations.test.ts tests/reservation-detail.test.ts",
+    "test": "vitest run tests/foundation.test.ts tests/api-contract.test.ts tests/events.test.ts tests/event-presentation.test.ts tests/guest-session.test.ts tests/reservations.test.ts tests/reservation-detail.test.ts tests/booking-client.test.ts",
     "test:contract": "vitest run tests/api-contract.test.ts",
     "test:integration": "vitest run tests/database.integration.test.ts",
     "test:http": "tsx scripts/test-session-http.ts",

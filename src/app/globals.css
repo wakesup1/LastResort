@@ -122,6 +122,10 @@ button:focus-visible, a:focus-visible, main:focus-visible { outline: 3px solid v
 .guest-access-note .icon { margin-top: 3px; }
 .review-actions { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 28px; }
 .confirmation-unavailable { margin-top: 16px; }
+.reservation-reference { font-family: ui-monospace, monospace; font-size: 1rem; overflow-wrap: anywhere; user-select: all; }
+.result-title, .result-link { margin-top: 24px; }
+.booking-feedback:not(:empty) { margin-bottom: 24px; }
+h1:focus { outline: 3px solid var(--lr-focus); outline-offset: 4px; }
 
 .page-state { max-width: 580px; padding: 64px 0; margin: 0 auto; }
 .state-symbol { width: 46px; height: 46px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 24px; border-radius: 50%; }
@@ -150,7 +154,7 @@ button:focus-visible, a:focus-visible, main:focus-visible { outline: 3px solid v
 
 @media (max-width: 639px) {
   .app-shell { width: calc(100% - 32px); }
-  .site-header { min-height: 76px; padding: 16px 0; }
+  .site-header { min-height: 76px; padding: 16px 0; flex-wrap: wrap; }
   .wordmark { font-size: 1.0625rem; gap: 6px; }
   .wordmark .icon { width: 24px; height: 24px; }
   .demo-label { font-size: .75rem; letter-spacing: .03em; }

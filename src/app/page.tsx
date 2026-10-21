@@ -42,7 +42,7 @@ export default function Home() {
               </aside>
             </article>
             <div className="below-ticket"><SaleWindow event={event} /><p className="supporting-text event-disclaimer">Fictional event. Free admission.<br />All times are in Bangkok (UTC+7).</p></div>
-            <Notice title="Explore the event. Review your ticket.">Reservation confirmation is coming soon. No tickets can be reserved in this version.</Notice>
+            <Notice title="Explore the event. Review your ticket.">Confirm one free ticket after reviewing. Keep your result link to reopen the reservation in this browser.</Notice>
           </>
         )}
       </EventState>
