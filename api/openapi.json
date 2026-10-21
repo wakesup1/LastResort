@@ -3,7 +3,7 @@
   "info": {
     "title": "LastResort API",
     "version": "0.1.0",
-    "description": "S1-06 contract. GET /api/health and GET /api/events/{eventId} are implemented. Operations marked planned are design contracts for subsequent tasks, not live endpoints. JSON uses camelCase and date-times include a timezone. The server decides sale windows, inventory and ownership. Error messages contain no stack traces, credentials or session tokens."
+    "description": "S1-06/S1-10 contract. GET /api/health, GET /api/events/{eventId}, and POST /api/session are implemented. Operations marked planned are design contracts for subsequent tasks, not live endpoints. JSON uses camelCase and date-times include a timezone. The server decides sale windows, inventory and ownership. Guest sessions use a 30-day HttpOnly, SameSite=Lax cookie; it is Secure over HTTPS. Only a SHA-256 token hash is stored. Error messages contain no stack traces, credentials or session tokens."
   },
   "servers": [
     {
@@ -11,6 +11,32 @@
     }
   ],
   "paths": {
+    "/api/session": {
+      "post": {
+        "operationId": "createOrResumeGuestSession",
+        "summary": "Create or resume this browser's guest session",
+        "description": "Implemented for S1-10. Same-origin POST with no request body. Creates a new server-side owner when the cookie is missing, invalid, or expired; otherwise it keeps the current owner. The opaque token is only sent in the HttpOnly lastresort_guest cookie and its SHA-256 hash is stored. The session expires 30 days after creation. No owner or token is accepted from or returned to JSON.",
+        "x-implementation": "implemented",
+        "responses": {
+          "204": {
+            "description": "The guest session is ready. Set-Cookie is included only when a new session was created.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Responses are not cached.",
+                "schema": { "type": "string", "enum": ["no-store"] }
+              },
+              "Set-Cookie": {
+                "description": "Opaque guest session cookie. HttpOnly, SameSite=Lax, Path=/, Max-Age=2592000; Secure is set over HTTPS.",
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "403": { "$ref": "#/components/responses/OriginForbidden" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "operationId": "getHealth",
@@ -147,7 +173,7 @@
       "post": {
         "operationId": "createReservation",
         "summary": "Confirm one ticket",
-        "description": "Planned for S1-10/S1-11. The server creates a guest session if needed and determines the owner. No owner or session token is accepted in JSON. Same-origin requests only. Success is returned after the reservation and inventory commit together. Idempotency behavior is delivered in S2-03: scope the key to the owner; the same key and payload return the same reference without decrementing again; changed payload returns 409 OPERATION_CONFLICT. Keep the original key on timeout/reload. Do not create a new operation while the outcome is unknown. Cookie name, expiry and storage details will be finalized in S1-10; cookies must be HttpOnly, SameSite and Secure on HTTPS.",
+        "description": "Planned for S1-11. The server creates a guest session if needed and determines the owner. No owner or session token is accepted in JSON. Same-origin requests only. Success is returned after the reservation and inventory commit together. Idempotency behavior is delivered in S2-03: scope the key to the owner; the same key and payload return the same reference without decrementing again; changed payload returns 409 OPERATION_CONFLICT. Keep the original key on timeout/reload. Do not create a new operation while the outcome is unknown. The lastresort_guest cookie is HttpOnly, SameSite=Lax, Path=/, expires after 30 days, and is Secure over HTTPS; only its SHA-256 hash is stored.",
         "x-implementation": "planned",
         "parameters": [
           {
@@ -294,8 +320,9 @@
       "get": {
         "operationId": "getReservation",
         "summary": "Reopen an owned reservation",
-        "description": "Planned for S1-10/S1-12. Ownership comes only from the server-validated guest cookie. Missing/invalid session returns 401. Unknown references and cross-owner references both return 404 without revealing whether the booking exists. Reading never creates a reservation. Clearing cookies or changing browsers does not recover old bookings.",
+        "description": "Planned for S1-12. Ownership comes only from the server-validated lastresort_guest cookie. Missing/invalid session returns 401. Unknown references and cross-owner references both return 404 without revealing whether the booking exists. Reading never creates a reservation. Clearing cookies or changing browsers does not recover old bookings.",
         "x-implementation": "planned",
+        "security": [{ "guestSessionCookie": [] }],
         "parameters": [
           {
             "name": "reference",
@@ -362,6 +389,13 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "guestSessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "lastresort_guest"
+      }
+    },
     "schemas": {
       "HealthReady": {
         "type": "object",
@@ -426,6 +460,7 @@
                 "type": "string",
                 "enum": [
                   "INVALID_REQUEST",
+                  "ORIGIN_FORBIDDEN",
                   "NOT_FOUND",
                   "SESSION_REQUIRED",
                   "SALES_NOT_OPEN",
@@ -633,6 +668,33 @@
               "error": {
                 "code": "INVALID_REQUEST",
                 "message": "The request is invalid. Do not include owner/session fields in request data."
+              }
+            }
+          }
+        }
+      },
+      "OriginForbidden": {
+        "description": "The request Origin does not match the API origin.",
+        "headers": {
+          "Cache-Control": {
+            "description": "Responses are not cached.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "no-store"
+              ]
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": {
+                "code": "ORIGIN_FORBIDDEN",
+                "message": "This endpoint accepts same-origin requests only."
               }
             }
           }

@@ -13,7 +13,7 @@
     "prestart": "tsx scripts/check-config.ts",
     "start": "next start",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "vitest run tests/foundation.test.ts tests/api-contract.test.ts tests/events.test.ts tests/event-presentation.test.ts",
+    "test": "vitest run tests/foundation.test.ts tests/api-contract.test.ts tests/events.test.ts tests/event-presentation.test.ts tests/guest-session.test.ts",
     "test:contract": "vitest run tests/api-contract.test.ts",
     "test:integration": "vitest run tests/database.integration.test.ts",
     "db:migrate": "tsx scripts/database.ts migrate",

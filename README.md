@@ -1,6 +1,6 @@
 # LastResort
 
-A limited-capacity ticket booking platform. The first release has one demo event, guest sessions, and immediate confirmation. S1-05 provides the Next.js foundation, PostgreSQL 17, migrations, seed data, and a health check. S1-06 adds API contracts and CI. S1-08/S1-09 provide the event details page and server-derived sale status; guest sessions and booking actions follow in later tasks. The project interface, sample data, and documentation are in English.
+A limited-capacity ticket booking platform. The first release has one demo event, guest sessions, and immediate confirmation. S1-05 provides the Next.js foundation, PostgreSQL 17, migrations, seed data, and a health check. S1-06 adds API contracts and CI. S1-08/S1-09 provide the event details page and server-derived sale status. S1-10 adds server-managed guest sessions; reservation actions follow in later tasks. The project interface, sample data, and documentation are in English.
 
 ## Run from a fresh checkout
 
@@ -26,9 +26,11 @@ A ready database returns HTTP 200 with `{"status":"ok","database":"ready"}`. An 
 
 The interface follows the [Ticket Studio frontend direction](FRONTEND_DIRECTION.md), using a self-hosted Space Grotesk font, warm paper surfaces, and a ticket layout. The font and its SIL Open Font License are in `src/app/fonts/`. No external font request is needed at runtime or build time.
 
-When sales are open, **Review booking** opens `/review` with fresh event details, one general-admission ticket, and a Free total. This is a read-only review: **Confirm reservation** is disabled and explained until the reservation endpoint and guest session are implemented. Neither page reserves inventory. History and confirmed-ticket screens are not enabled yet. A failed availability refresh preserves the last details with an explicit stale-data warning and blocks entry to review until a successful refresh; a not-found response clears the old event.
+When sales are open, **Review booking** opens `/review` with fresh event details, one general-admission ticket, and a Free total. This is a read-only review: **Confirm reservation** is disabled and explained until the reservation endpoint is implemented. Neither page reserves inventory. History and confirmed-ticket screens are not enabled yet. A failed availability refresh preserves the last details with an explicit stale-data warning and blocks entry to review until a successful refresh; a not-found response clears the old event.
 
 After the first seed, `db:status` should show `live-sessions-demo`, Live Sessions (Demo), capacity 100, and remaining 100. The fictional event takes place at Demo Hall on November 21, 2026 at 19:00 (Asia/Bangkok). General admission is free, with one ticket per request. Sales run from October 1, 2026 at 07:00 to November 21, 2026 at 18:00 (Asia/Bangkok). These are fixed fixture dates; sales close when that window ends.
+
+`POST /api/session` creates or resumes the guest owner for this browser. It accepts same-origin requests only, has no request body, and returns no JSON or session token. The server sends the opaque token in the `lastresort_guest` cookie with `HttpOnly`, `SameSite=Lax`, `Path=/`, and a fixed 30-day expiry; it adds `Secure` over HTTPS. PostgreSQL stores only the token's SHA-256 hash. Clearing the cookie or using another browser starts a new guest session and does not recover prior bookings.
 
 Migrations can be run repeatedly and record which files have been applied. Seed only inserts a missing event: it never overwrites an existing event or replenishes inventory. The fixture uses 100 tickets for backlog tests; the earlier UX prototype used three tickets to make exploration quicker.
 
@@ -89,19 +91,19 @@ docker compose exec -T db createdb -U lastresort lastresort_test_foundation
 TEST_DATABASE_URL=postgresql://lastresort:lastresort_local_demo@127.0.0.1:55432/lastresort_test_foundation npm run test:integration
 ```
 
-If the database already exists, skip `createdb`. Integration tests cover repeated migrations and seed, seed without inventory replenishment, rejected resets for production or mismatching markers or missing confirmation, confirmed reset, and preservation of tables outside the app schema. Booking correctness tests belong to S1-11 and Sprint 2.
+If the database already exists, skip `createdb`. Integration tests cover repeated migrations and seed, seed without inventory replenishment, guest-session persistence and expiry, rejected resets for production or mismatching markers or missing confirmation, confirmed reset, and preservation of tables outside the app schema. Booking correctness tests belong to S1-11 and Sprint 2.
 
 ## API contract and CI
 
-[api/openapi.json](api/openapi.json) is the OpenAPI 3.0 contract. Each operation has an `x-implementation` marker: `GET /api/health` and `GET /api/events/{eventId}` are implemented. Reservation operations describe subsequent tasks and are not available yet. Session cookie details will be finalized in S1-10 and retry behavior in S2-03.
+[api/openapi.json](api/openapi.json) is the OpenAPI 3.0 contract. Each operation has an `x-implementation` marker: `GET /api/health`, `GET /api/events/{eventId}`, and `POST /api/session` are implemented. Reservation operations describe subsequent tasks and are not available yet. Retry behavior is finalized in S2-03.
 
-The contract includes request/response examples, HTTP status codes, and errors. Booking requests allow one ticket and never accept client-supplied ownership. General errors use `{"error":{"code":"INVALID_REQUEST","message":"..."}}`. Health retains its existing 200/503 readiness responses; unsupported query parameters return a 400 error without accessing the database or echoing input.
+The contract includes request/response examples, HTTP status codes, and errors. Booking requests allow one ticket and never accept client-supplied ownership. General errors use `{"error":{"code":"INVALID_REQUEST","message":"..."}}`. Health retains its existing 200/503 readiness responses; unsupported query parameters return a 400 error without accessing the database or echoing input. Session creation rejects missing or cross-origin `Origin` headers before database access.
 
 ```sh
 npm run test:contract
 ```
 
-Contract tests validate the OpenAPI document, its examples, booking input rules, and the actual health route's response status/body/headers with controlled database outcomes. They do not establish booking endpoint behavior before implementation. Update the contract and add route tests together when implementing each endpoint.
+Contract tests validate the OpenAPI document, its examples, booking input rules, and the actual health route's response status/body/headers with controlled database outcomes. Guest-session tests cover cookie creation/reuse, token hashing, expiry, origin checks, and safe errors. Reservation endpoint behavior remains unimplemented; update the contract and add route tests together when implementing each endpoint.
 
 The [CI workflow](.github/workflows/ci.yml) runs on pull requests, pushes to `main`, and manual dispatch. It installs from the lockfile, then runs typecheck, all unit/contract tests, PostgreSQL 17 integration tests, and the production build. Any failure stops the job and marks the check failed. CI uses a disposable `lastresort_test_ci` database with no production secrets. TypeScript checks provide the initial static analysis; there is no separate lint command yet.
 
