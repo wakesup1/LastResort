@@ -3,42 +3,42 @@
 import Link from "next/link";
 import { AppShell } from "../_components/app-shell.tsx";
 import { EventState } from "../_components/event-state.tsx";
+import { BookingSummary } from "../_components/booking-summary.tsx";
 import { Icon, Notice, StatusBadge } from "../_components/ui.tsx";
 import { useEventDetails } from "../_hooks/use-event-details.ts";
-import { formatEventDate, saleStatusCopy } from "../_lib/event-details.ts";
+import { saleStatusCopy } from "../_lib/event-details.ts";
+import { useBooking } from "../_hooks/use-booking.ts";
 
 export default function ReviewBooking() {
   const { state, refresh } = useEventDetails();
+  const { booking, confirm } = useBooking();
+  const canConfirm = (booking.kind === "ready" || booking.kind === "rejected") && state.kind === "ready" && state.freshness === "current" && state.event.saleStatus === "open";
 
   return (
     <AppShell>
+      <div className="reading-container booking-feedback" aria-live="polite" aria-atomic="true">
+        {booking.kind === "pending" && <Notice title="Confirming reservation…">Keep this page open. Your ticket is confirmed only when the server returns a result.</Notice>}
+        {booking.kind === "unknown" && <Notice tone="warning" title="Your booking outcome is unknown.">A ticket may already be reserved. Do not confirm again, including in another tab. Automatic recovery is not available yet.</Notice>}
+        {booking.kind === "blocked" && <Notice tone="warning" title="Booking is unavailable in this tab.">We could not safely read the saved booking state. Keep any existing result link; do not clear browser data to retry an uncertain booking.</Notice>}
+        {booking.kind === "confirmed" && <Notice title="Your reservation was confirmed."><Link href={`/reservations/${booking.reference}`}>Open your original booking result</Link></Notice>}
+      </div>
+      {booking.kind === "rejected" && <div className="reading-container booking-feedback" role="alert"><Notice tone="warning" title="Reservation not completed.">{booking.message}</Notice></div>}
       <EventState state={state} onRetry={refresh}>
         {state.kind === "ready" && (
           <div className="reading-container">
             <Link className="button button-secondary back-link" href="/"><Icon name="back" /> Event details</Link>
             <p className="eyebrow">YOUR RESERVATION / REVIEW</p>
             <h1 className="page-title">One place. Yours to review.</h1>
-            <p className="page-description">Check the details before reservation confirmation becomes available.</p>
-            <div className="ticket summary-ticket">
-              <div className="ticket-body">
-                <p className="eyebrow">EVENT</p>
-                <h2>{state.event.name}</h2>
-                <dl className="summary-facts">
-                  <div><dt>When</dt><dd><time dateTime={state.event.startsAt}>{formatEventDate(state.event.startsAt)}</time></dd></div>
-                  <div><dt>Where</dt><dd>{state.event.venue}</dd></div>
-                  <div><dt>Ticket</dt><dd>{state.event.ticketType} × 1</dd></div>
-                </dl>
-              </div>
-              <div className="ticket-stub total-stub"><span className="eyebrow">TOTAL</span><strong>Free</strong><span>No payment required</span></div>
-            </div>
+            <p className="page-description">Review one ticket, then confirm your reservation.</p>
+            <BookingSummary event={state.event} />
             {state.event.saleStatus !== "open" && <div className="review-sale-status"><StatusBadge tone={state.freshness === "current" ? "neutral" : "warning"}>{state.freshness === "current" ? saleStatusCopy(state.event.saleStatus).label : "Availability needs updating"}</StatusBadge><p className="supporting-text">{state.freshness === "current" ? saleStatusCopy(state.event.saleStatus).detail : "Refresh availability to check the current sale status."}</p></div>}
-            <Notice title="Reviewing does not reserve a ticket.">Availability will be checked when confirmation is available.</Notice>
-            <div className="guest-access-note"><Icon name="monitor" /><p>When booking is available, your ticket will be saved in this browser. Clearing cookies or using another browser will remove access.</p></div>
-            <div className="review-actions"><button className="button button-primary" type="button" disabled aria-describedby="confirmation-unavailable">Confirm reservation <Icon name="arrow" /></button><button className="button button-secondary" type="button" onClick={refresh} disabled={state.freshness === "refreshing"}><Icon name="refresh" /> {state.freshness === "refreshing" ? "Updating…" : "Refresh availability"}</button></div>
-            <p className="supporting-text confirmation-unavailable" id="confirmation-unavailable">Reservation confirmation is coming soon. No ticket has been reserved.</p>
+            <Notice title="Reviewing does not reserve a ticket.">Availability is checked again when you confirm. There is no payment step.</Notice>
+            <div className="guest-access-note"><Icon name="monitor" /><p>Your ticket is accessible in this browser. Clearing cookies or using another browser removes access.</p></div>
+            <div className="review-actions"><button className="button button-primary" type="button" disabled={!canConfirm} onClick={() => { void confirm(state.event.eventId); }}>{booking.kind === "pending" ? "Confirming reservation…" : "Confirm reservation"}<Icon name="arrow" /></button><button className="button button-secondary" type="button" onClick={refresh} disabled={state.freshness === "refreshing" || booking.kind === "pending"}><Icon name="refresh" /> {state.freshness === "refreshing" ? "Updating…" : "Refresh availability"}</button></div>
           </div>
         )}
       </EventState>
+      {booking.kind === "confirmed" && <div className="reading-container result-link"><Link className="button button-primary" href={`/reservations/${booking.reference}`}>View booking result <Icon name="arrow" /></Link></div>}
     </AppShell>
   );
 }

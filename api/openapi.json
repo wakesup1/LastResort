@@ -3,7 +3,7 @@
   "info": {
     "title": "LastResort API",
     "version": "0.1.0",
-    "description": "S1-06/S1-10 contract. GET /api/health, GET /api/events/{eventId}, and POST /api/session are implemented. Operations marked planned are design contracts for subsequent tasks, not live endpoints. JSON uses camelCase and date-times include a timezone. The server decides sale windows, inventory and ownership. Guest sessions use a 30-day HttpOnly, SameSite=Lax cookie; it is Secure over HTTPS. Only a SHA-256 token hash is stored. Error messages contain no stack traces, credentials or session tokens."
+    "description": "S1-12 contract. Health, event details, guest sessions, atomic booking and ownership-safe reservation details are implemented. Operations marked planned are design contracts for subsequent tasks, not live endpoints. JSON uses camelCase and date-times include a timezone. The server decides sale windows, inventory and ownership. Guest sessions use a 30-day HttpOnly, SameSite=Lax cookie; it is Secure over HTTPS. Only a SHA-256 token hash is stored. Error messages contain no stack traces, credentials or session tokens."
   },
   "servers": [
     {
@@ -173,7 +173,7 @@
       "post": {
         "operationId": "createReservation",
         "summary": "Confirm one ticket",
-        "description": "S1-11 atomic booking API. Establish a guest session first with POST /api/session; missing, invalid or expired sessions return 401. The owner comes only from the server-validated cookie. No owner/session data is accepted in JSON. Same-origin requests only. Accepts application/json with exactly eventId and quantity: 1, up to 1024 bytes, and no query parameters. A row lock and conditional update check database time after any lock wait; the reservation and inventory commit together before a 201 response. Each accepted POST is a new booking. Retry/idempotency support belongs to S2-03 and is not implemented: Idempotency-Key is currently rejected with 400 before database access. Do not retry an unknown outcome or expose the booking action in the UI before recovery is implemented. Reopening a result belongs to S1-12.",
+        "description": "S1-11 atomic booking API. Establish a guest session first with POST /api/session; missing, invalid or expired sessions return 401. The owner comes only from the server-validated cookie. No owner/session data is accepted in JSON. Same-origin requests only. Accepts application/json with exactly eventId and quantity: 1, up to 1024 bytes, and no query parameters. A row lock and conditional update check database time after any lock wait; the reservation and inventory commit together before a 201 response. Each accepted POST is a new booking. Retry/idempotency support belongs to S2-03 and is not implemented: Idempotency-Key is currently rejected with 400 before database access. The S1-12 browser flow persists a submission guard before sending and blocks repeat clicks and uncertain resubmission across reloads. Do not retry an unknown outcome. GET /api/reservations/{reference} reopens an owned known result; lost-response discovery remains future work.",
         "x-implementation": "implemented",
         "requestBody": {
           "required": true,
@@ -308,8 +308,8 @@
       "get": {
         "operationId": "getReservation",
         "summary": "Reopen an owned reservation",
-        "description": "Planned for S1-12. Ownership comes only from the server-validated lastresort_guest cookie. Missing/invalid session returns 401. Unknown references and cross-owner references both return 404 without revealing whether the booking exists. Reading never creates a reservation. Clearing cookies or changing browsers does not recover old bookings.",
-        "x-implementation": "planned",
+        "description": "Implemented for S1-12. Invalid UUID references and query parameters return 400 before database access. Ownership comes only from the server-validated lastresort_guest cookie. Missing/invalid session returns 401. Unknown references and cross-owner references both return 404 without revealing whether the booking exists. Reading never creates a reservation. Clearing cookies or changing browsers does not recover old bookings.",
+        "x-implementation": "implemented",
         "security": [{ "guestSessionCookie": [] }],
         "parameters": [
           {

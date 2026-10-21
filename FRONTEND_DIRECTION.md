@@ -10,7 +10,7 @@ The first release has one fictional event, pooled general admission, one ticket 
 
 History belongs to the same browser and its guest cookie. A reference identifies a reservation but grants no access. Clearing cookies or using another browser cannot recover reservations in this release. Surface this limitation before confirmation and in history.
 
-The current contract implements health and event details. Reservation creation and detail are planned; history and operation discovery still need their task-specific contracts. The screens below describe intended behavior as those capabilities arrive. A disabled or preview action must never imply that its endpoint is implemented.
+The API contract records supported health, event, session and reservation operations. History and operation discovery need their task-specific contracts. The screens below describe the visual direction as each capability arrives. A disabled or preview action must never imply that its endpoint is implemented.
 
 ## Design principles
 

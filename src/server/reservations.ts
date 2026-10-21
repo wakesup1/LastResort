@@ -17,6 +17,29 @@ type BookingClient = {
   query<Row extends QueryResultRow = QueryResultRow>(sql: string, values?: string[]): Promise<{ rows: Row[] }>;
 };
 
+export async function readReservation(
+  client: BookingClient,
+  cookieHeader: string | null,
+  reference: string,
+): Promise<BookingResult> {
+  const session = await resolveGuestSession((sql, values) => client.query(sql, values), cookieHeader);
+  if (!session) return { code: "SESSION_REQUIRED" };
+  const result = await client.query<EventRow & { reference: string; created_at: Date }>(
+    `SELECT event.id, event.name, event.starts_at, event.venue, event.ticket_type,
+            reservation.reference, reservation.created_at
+       FROM lastresort.reservations AS reservation
+       JOIN lastresort.events AS event ON event.id = reservation.event_id
+      WHERE reservation.reference = $1 AND reservation.guest_session_id = $2`,
+    [reference, session.ownerId],
+  );
+  const row = result.rows[0];
+  if (!row) return { code: "NOT_FOUND" };
+  return { reservation: {
+    reference: row.reference, status: "confirmed", quantity: 1, createdAt: row.created_at.toISOString(),
+    event: { eventId: row.id, name: row.name, startsAt: row.starts_at.toISOString(), venue: row.venue, ticketType: row.ticket_type },
+  } };
+}
+
 // The caller lends one checked-out client; every statement uses that connection.
 export async function reserveTicket(
   client: BookingClient,

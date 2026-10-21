@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { assertDisposableDatabase } from "../src/server/config.ts";
 import { checkHealth } from "../src/server/health.ts";
 import { createGuestSession, GUEST_SESSION_COOKIE_NAME, resolveGuestSession } from "../src/server/guest-session.ts";
-import { reserveTicket } from "../src/server/reservations.ts";
+import { readReservation, reserveTicket } from "../src/server/reservations.ts";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("Missing configuration: TEST_DATABASE_URL (dedicated lastresort_test database required)");
@@ -155,6 +155,25 @@ describe("PostgreSQL 17 atomic reservations (S1-11)", () => {
     const stored = await pool.query("SELECT * FROM lastresort.reservations WHERE reference = $1", [result.reservation.reference]);
     expect(stored.rows[0]).toMatchObject({ guest_session_id: ownerId, event_id: eventId, quantity: 1, status: "confirmed" });
     expect(result.reservation.createdAt).toBe(stored.rows[0].created_at.toISOString());
+    await expectInventory(0, 1);
+  });
+
+  it("reopens the persisted original result and hides it from other/expired sessions without writes", async () => {
+    const result = await book();
+    if (!("reservation" in result)) throw new Error("Expected a confirmed reservation.");
+    const { reference } = result.reservation;
+    const other = await createGuestSession((sql, values) => pool.query(sql, values));
+    const otherCookie = other.setCookie.split(";")[0];
+    const freshConnection = await pool.connect();
+    try {
+      expect(await readReservation(freshConnection, cookie, reference)).toEqual(result);
+      expect(await readReservation(freshConnection, cookie, reference)).toEqual(result);
+      expect(await readReservation(freshConnection, otherCookie, reference)).toEqual({ code: "NOT_FOUND" });
+      expect(await readReservation(freshConnection, cookie, randomUUID())).toEqual({ code: "NOT_FOUND" });
+      expect(await readReservation(freshConnection, "", reference)).toEqual({ code: "SESSION_REQUIRED" });
+      await pool.query("UPDATE lastresort.guest_sessions SET created_at = now() - interval '2 seconds', expires_at = now() - interval '1 second' WHERE id = $1", [ownerId]);
+      expect(await readReservation(freshConnection, cookie, reference)).toEqual({ code: "SESSION_REQUIRED" });
+    } finally { freshConnection.release(); }
     await expectInventory(0, 1);
   });
 

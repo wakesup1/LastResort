@@ -83,6 +83,7 @@ const config = readConfig({ APP_ENV: "test", DATABASE_URL: databaseUrl });
 const pool = new Pool({ connectionString: databaseUrl, connectionTimeoutMillis: 3000 });
 let server: ChildProcess | undefined;
 let createdTokenHash: string | undefined;
+let otherTokenHash: string | undefined;
 const bookingEventId = `http-booking-${randomUUID()}`;
 let createdBookingFixture = false;
 
@@ -178,9 +179,27 @@ try {
   assert.equal(stored.rows.length, 1);
   assert.equal(stored.rows[0].reference, booking.reference);
   assert.equal(stored.rows[0].quantity, 1);
+  const resultUrl = `${origin}/api/reservations/${String(booking.reference)}`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const reopened: Response = await fetch(resultUrl, { headers: { Cookie: cookie.split(";")[0] } });
+    assert.equal(reopened.status, 200);
+    assert.equal(reopened.headers.get("cache-control"), "no-store");
+    assert.deepEqual(await reopened.json(), booking);
+  }
+  assert.equal((await fetch(resultUrl)).status, 401);
+  const otherSession = await postSession(port, origin);
+  const otherCookie = otherSession.headers["set-cookie"]?.[0]?.split(";")[0];
+  assert.ok(otherCookie);
+  otherTokenHash = createHash("sha256").update(otherCookie.split("=")[1], "utf8").digest("hex");
+  const forbiddenRead = await fetch(resultUrl, { headers: { Cookie: otherCookie } });
+  const missingRead = await fetch(`${origin}/api/reservations/${randomUUID()}`, { headers: { Cookie: cookie.split(";")[0] } });
+  assert.equal(forbiddenRead.status, 404);
+  assert.equal(missingRead.status, 404);
+  assert.equal(await forbiddenRead.text(), await missingRead.text());
+  assert.equal((await pool.query("SELECT count(*)::int AS count FROM lastresort.reservations WHERE event_id = $1", [bookingEventId])).rows[0].count, 1);
   assert.equal((await postBooking()).status, 409);
   assert.equal((await pool.query("SELECT remaining FROM lastresort.events WHERE id = $1", [bookingEventId])).rows[0].remaining, 0);
-  process.stdout.write("Production-server session and atomic-booking HTTP checks passed.\n");
+  process.stdout.write("Production-server session, atomic-booking and owned-result HTTP checks passed.\n");
 } finally {
   if (createdBookingFixture) {
     await pool.query("DELETE FROM lastresort.reservations WHERE event_id = $1", [bookingEventId]).catch(() => {});
@@ -188,6 +207,9 @@ try {
   }
   if (createdTokenHash) {
     await pool.query("DELETE FROM lastresort.guest_sessions WHERE token_hash = $1", [createdTokenHash]).catch(() => {});
+  }
+  if (otherTokenHash) {
+    await pool.query("DELETE FROM lastresort.guest_sessions WHERE token_hash = $1", [otherTokenHash]).catch(() => {});
   }
   if (server) await stopServer(server);
   await pool.end();
