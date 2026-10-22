@@ -42,9 +42,9 @@ export default function BookingResult() {
       <h1 ref={heading} tabIndex={-1} className="page-title result-title">Your ticket is confirmed.</h1>
       <p className="page-description">One place is saved for you. This is your original booking result.</p>
       <BookingSummary event={state.reservation.event} reference={state.reservation.reference} />
-      <Notice title="Keep this result link.">Bookmark this page to reopen your ticket in this browser. Refreshing reads this reservation and never books another ticket.</Notice>
+      <Notice title="Find this ticket again.">Open Booking history or bookmark this page to reopen your ticket in this browser. Refreshing reads this reservation and never books another ticket.</Notice>
       <div className="guest-access-note"><Icon name="monitor" /><p>Clearing cookies or using another browser removes access. A reference alone does not grant access.</p></div>
-      <div className="review-actions"><button type="button" className="button button-secondary" onClick={() => { void load(); }}><Icon name="refresh" /> Refresh result</button>
+      <div className="review-actions"><Link className="button button-primary" href="/history">Booking history <Icon name="arrow" /></Link><button type="button" className="button button-secondary" onClick={() => { void load(); }}><Icon name="refresh" /> Refresh result</button>
         <Link className="button button-secondary" href="/review" onClick={() => {
           try {
             const prior = createBookingController(sessionStorage).restore();

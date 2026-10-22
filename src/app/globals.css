@@ -45,6 +45,8 @@ button:focus-visible, a:focus-visible, main:focus-visible { outline: 3px solid v
 .wordmark { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; font-size: 1.25rem; font-weight: 700; letter-spacing: -.06em; text-decoration: none; }
 .wordmark .icon { height: 1.75rem; width: 1.75rem; color: var(--lr-brand); }
 .demo-label { color: var(--lr-muted); font-size: .75rem; font-weight: 500; letter-spacing: .08em; }
+.site-nav { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 20px; }
+.site-nav a { display: inline-flex; align-items: center; min-height: 44px; font-size: .875rem; text-underline-offset: 4px; }
 .main-content { flex: 1; padding: 40px 0 48px; min-width: 0; }
 .site-footer { margin-top: auto; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 22px 0; border-top: 1px solid var(--lr-line); color: var(--lr-muted); font-size: .75rem; }
 
@@ -105,6 +107,14 @@ button:focus-visible, a:focus-visible, main:focus-visible { outline: 3px solid v
 .refresh-warning .notice { margin: 0 0 24px; }
 
 .reading-container { max-width: 760px; margin: 0 auto; }
+.history-status { margin-top: 24px; }
+.history-list { list-style: none; padding: 0; margin: 16px 0 24px; display: grid; gap: 20px; }
+.history-card { background: var(--lr-paper); border: 1px solid var(--lr-line); border-radius: 8px; padding: 24px; min-width: 0; overflow-wrap: anywhere; }
+.history-card h2 { margin: 16px 0 8px; }
+.history-card p + p { margin-top: 6px; }
+.history-reference { margin-bottom: 20px; }
+.history-message { margin-top: 24px; }
+.history-message p { margin: 12px 0 24px; color: var(--lr-muted); }
 .back-link { margin-bottom: 28px; }
 .page-description { margin: 14px 0 28px; color: var(--lr-muted); }
 .summary-ticket { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }

@@ -1,0 +1,72 @@
+"use client";
+
+import Link from "next/link";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AppShell } from "../_components/app-shell.tsx";
+import { Icon, Notice, StatusBadge } from "../_components/ui.tsx";
+import { formatEventDate } from "../_lib/event-details.ts";
+import { loadHistoryPage, type HistoryPage } from "../_lib/history.ts";
+
+type HistoryState = HistoryPage & { kind: "loading" | "ready" | "error" | "session-required"; loadingMore: boolean };
+const emptyPage: HistoryPage = { reservations: [], nextCursor: null };
+
+export default function BookingHistory() {
+  const [state, setState] = useState<HistoryState>({ ...emptyPage, kind: "loading", loadingMore: false });
+  const active = useRef<AbortController | null>(null);
+  const focusReference = useRef<string | null>(null);
+  const load = useCallback(async (before: string | null = null) => {
+    active.current?.abort();
+    const controller = new AbortController();
+    active.current = controller;
+    setState((prior) => before ? { ...prior, kind: "loading", loadingMore: true } : { ...emptyPage, kind: "loading", loadingMore: false });
+    try {
+      const page = await loadHistoryPage(before, AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]));
+      if (controller.signal.aborted) return;
+      if (page === "session-required") { setState({ ...emptyPage, kind: "session-required", loadingMore: false }); return; }
+      focusReference.current = before ? page.reservations[0]?.reference ?? null : null;
+      setState((prior) => ({
+        kind: "ready", loadingMore: false, nextCursor: page.nextCursor,
+        reservations: before ? [...prior.reservations, ...page.reservations] : page.reservations,
+      }));
+    } catch {
+      if (!controller.signal.aborted) setState((prior) => ({ ...prior, kind: "error", loadingMore: false }));
+    }
+  }, []);
+  useEffect(() => { void load(); return () => active.current?.abort(); }, [load]);
+  useEffect(() => {
+    if (focusReference.current) {
+      document.getElementById(`ticket-${focusReference.current}`)?.focus();
+      focusReference.current = null;
+    }
+  }, [state.reservations]);
+
+  return <AppShell><div className="reading-container">
+    <p className="eyebrow">YOUR RESERVATIONS / HISTORY</p>
+    <h1 className="page-title">Booking history</h1>
+    <p className="page-description">Find confirmed tickets booked in this browser, newest first.</p>
+    <Notice title="Your tickets stay with this browser.">History uses your original guest cookies. Clearing cookies, an expired session or another browser cannot recover earlier bookings.</Notice>
+    <div className="review-actions">
+      <button type="button" className="button button-secondary" disabled={state.kind === "loading"} onClick={() => { void load(); }}><Icon name="refresh" /> Refresh history</button>
+      <Link className="button button-secondary" href="/">Event details</Link>
+    </div>
+    <p className="history-status supporting-text" role="status" aria-live="polite">{state.kind === "loading" ? state.loadingMore ? "Loading older bookings…" : "Loading booking history…" : state.kind === "ready" && state.reservations.length > 0 ? `${state.reservations.length} confirmed booking${state.reservations.length === 1 ? "" : "s"} shown.` : ""}</p>
+    {state.reservations.length > 0 && <ol className="history-list" aria-label="Confirmed bookings">{state.reservations.map((reservation) => <li key={reservation.reference} className="history-card">
+      <StatusBadge tone="success">Confirmed · 1 ticket</StatusBadge>
+      <h2>{reservation.event.name}</h2>
+      <p>{formatEventDate(reservation.event.startsAt)} · {reservation.event.venue}</p>
+      <p className="supporting-text">{reservation.event.ticketType} · Free</p>
+      <p className="supporting-text">Booked {formatEventDate(reservation.createdAt)}</p>
+      <p className="history-reference supporting-text">Reference: {reservation.reference}</p>
+      <Link id={`ticket-${reservation.reference}`} className="button button-secondary" href={`/reservations/${reservation.reference}`} aria-label={`View ticket ${reservation.reference}`}>View ticket <Icon name="arrow" /></Link>
+    </li>)}</ol>}
+    {state.kind === "error" && <div className="history-message" role="alert"><h2>Booking history could not be loaded.</h2>
+      <p>{state.reservations.length ? "Older bookings could not be loaded. The tickets already shown are still here." : "This does not mean your history is empty. Try reading it again."}</p>
+      <button type="button" className="button button-primary" onClick={() => { void load(state.nextCursor); }}>Try reading again</button>
+    </div>}
+    {(state.kind === "session-required" || (state.kind === "ready" && state.reservations.length === 0)) && <div className="history-message" role="status">
+      <h2>{state.kind === "session-required" ? "This browser cannot access earlier bookings." : "No bookings in this browser yet."}</h2><p>{state.kind === "session-required" ? "There is no valid guest session. For earlier bookings, use the original browser with its original cookies." : "Your confirmed tickets will appear here. You can explore the event to make your first booking."}</p>
+      <Link className="button button-primary" href="/">Explore the event <Icon name="arrow" /></Link>
+    </div>}
+    {state.nextCursor && state.kind !== "error" && <button type="button" className="button button-secondary" disabled={state.kind === "loading"} onClick={() => { void load(state.nextCursor); }}>{state.loadingMore ? "Loading…" : "Load older bookings"}</button>}
+  </div></AppShell>;
+}
