@@ -184,6 +184,81 @@
       }
     },
     "/api/reservations": {
+      "get": {
+        "operationId": "listReservations",
+        "summary": "List this guest session’s confirmed bookings",
+        "description": "Implemented for S2-05. Read-only history derives ownership solely from the validated guest cookie. No session is created or renewed. Returns up to 20 confirmed bookings ordered by createdAt descending, then reference ascending. Use nextCursor as before to load older entries; an unknown or other-owner cursor returns the same 404. Retries of an operation appear only once. No owner selector or other query parameters are accepted. Missing, invalid or expired sessions return 401; a valid new session returns an empty list. All responses use no-store. Cookie loss or a different browser cannot recover earlier history.",
+        "x-implementation": "implemented",
+        "security": [
+          {
+            "guestSessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The last reservation reference from the preceding page, owned by this session."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owned confirmed bookings, or an empty list for a valid session with no bookings.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationHistory"
+                },
+                "example": {
+                  "reservations": [
+                    {
+                      "reference": "6bda9f21-c452-44fa-9468-f34f59159f31",
+                      "status": "confirmed",
+                      "quantity": 1,
+                      "createdAt": "2026-10-20T10:00:00Z",
+                      "event": {
+                        "eventId": "live-sessions-demo",
+                        "name": "Live Sessions (Demo)",
+                        "startsAt": "2026-11-21T12:00:00Z",
+                        "venue": "Demo Hall",
+                        "ticketType": "General admission"
+                      }
+                    }
+                  ],
+                  "nextCursor": null
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/SessionRequired"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
       "post": {
         "operationId": "createReservation",
         "summary": "Confirm one ticket",
@@ -681,6 +756,29 @@
             "enum": [
               1
             ]
+          }
+        }
+      },
+      "ReservationHistory": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reservations",
+          "nextCursor"
+        ],
+        "properties": {
+          "reservations": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/Reservation"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "Last reference when more results exist; otherwise null."
           }
         }
       },
