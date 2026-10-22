@@ -21,7 +21,7 @@ beforeAll(async () => {
 function request(body: unknown = { eventId: event.id, quantity: 1 }, headers: Record<string, string> = {}, url = "https://example.test/api/reservations") {
   return new Request(url, {
     method: "POST",
-    headers: { Origin: "https://example.test", "Content-Type": "application/json", Cookie: `lastresort_guest=${"A".repeat(43)}`, ...headers },
+    headers: { Origin: "https://example.test", "Content-Type": "application/json", "Idempotency-Key": reference, Cookie: `lastresort_guest=${"A".repeat(43)}`, ...headers },
     body: JSON.stringify(body),
   });
 }
@@ -42,6 +42,7 @@ beforeEach(() => {
   connect.mockResolvedValue({ query, release });
   query.mockImplementation(async (sql: string) => {
     if (sql.includes("SELECT id\n")) return { rows: [{ id: ownerId }] };
+    if (sql.includes("SELECT event_id, response")) return { rows: [{ event_id: event.id, response: null }] };
     if (sql.includes("FOR UPDATE")) return { rows: [{ id: event.id }] };
     if (sql.includes("UPDATE lastresort.events")) return { rows: [event] };
     if (sql.includes("INSERT INTO lastresort.reservations")) return { rows: [{ reference, created_at: new Date("2026-10-21T09:00:00Z") }] };
@@ -56,6 +57,29 @@ describe("reservation HTTP boundary and transaction", () => {
     expect(query).toHaveBeenLastCalledWith("COMMIT");
     expect(query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO lastresort.reservations"), [expect.any(String), ownerId, event.id]);
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("returns a persisted replay without updating inventory or checking current sales", async () => {
+    const original = { reference, status: "confirmed", quantity: 1, createdAt: "2026-10-21T09:00:00.000Z", event: { eventId: event.id, name: event.name, startsAt: event.starts_at.toISOString(), venue: event.venue, ticketType: event.ticket_type } };
+    const implementation = query.getMockImplementation();
+    query.mockImplementation(async (sql: string, ...args: unknown[]) => {
+      if (sql.includes("SELECT event_id, response")) return { rows: [{ event_id: event.id, response: { reservation: original } }] };
+      return implementation?.(sql, ...args);
+    });
+    expect(await expectResponse(await POST(request()), 200)).toEqual(original);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("UPDATE lastresort.events"))).toBe(false);
+    expect(query).toHaveBeenLastCalledWith("COMMIT");
+  });
+
+  it("rejects a changed payload without changing the saved operation", async () => {
+    const implementation = query.getMockImplementation();
+    query.mockImplementation(async (sql: string, ...args: unknown[]) => {
+      if (sql.includes("SELECT event_id, response")) return { rows: [{ event_id: "other-event", response: null }] };
+      return implementation?.(sql, ...args);
+    });
+    expect(await expectResponse(await POST(request()), 409)).toMatchObject({ error: { code: "OPERATION_CONFLICT" } });
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("UPDATE lastresort."))).toBe(false);
+    expect(query).toHaveBeenLastCalledWith("ROLLBACK");
   });
 
   it.each(["", "null", "https://attacker.test"])("rejects Origin %s without database access", async (Origin) => {
@@ -73,15 +97,20 @@ describe("reservation HTTP boundary and transaction", () => {
     expect(connect).not.toHaveBeenCalled();
   });
 
-  it("rejects unsupported query parameters and retry keys before database access", async () => {
+  it("rejects unsupported query parameters and missing/malformed retry keys before database access", async () => {
     await expectResponse(await POST(request(undefined, {}, "https://example.test/api/reservations?owner=forged")), 400);
-    await expectResponse(await POST(request(undefined, { "Idempotency-Key": reference })), 400);
+    const missingKey = request();
+    missingKey.headers.delete("Idempotency-Key");
+    await expectResponse(await POST(missingKey), 400);
+    for (const key of ["", "invalid", `${reference},${reference}`]) {
+      await expectResponse(await POST(request(undefined, { "Idempotency-Key": key })), 400);
+    }
     expect(connect).not.toHaveBeenCalled();
   });
 
   it("rejects malformed JSON, oversized bodies, and unsupported media types", async () => {
     for (const body of ["{", " ".repeat(1025)]) {
-      await expectResponse(await POST(new Request("https://example.test/api/reservations", { method: "POST", headers: { Origin: "https://example.test", "Content-Type": "application/json" }, body })), 400);
+      await expectResponse(await POST(new Request("https://example.test/api/reservations", { method: "POST", headers: { Origin: "https://example.test", "Content-Type": "application/json", "Idempotency-Key": reference }, body })), 400);
     }
     await expectResponse(await POST(request(undefined, { "Content-Type": "text/plain" })), 415);
     expect(connect).not.toHaveBeenCalled();
@@ -100,20 +129,21 @@ describe("reservation HTTP boundary and transaction", () => {
   });
 
   it("returns not found without creating an entitlement", async () => {
-    query.mockImplementation(async (sql: string) => ({ rows: sql.includes("token_hash") ? [{ id: ownerId }] : [] }));
+    query.mockImplementation(async (sql: string) => ({ rows: sql.includes("token_hash") ? [{ id: ownerId }] : sql.includes("SELECT event_id, response") ? [{ event_id: event.id, response: null }] : [] }));
     await expectResponse(await POST(request()), 404);
-    expect(query).toHaveBeenLastCalledWith("ROLLBACK");
+    expect(query).toHaveBeenLastCalledWith("COMMIT");
   });
 
-  it.each(["SALES_NOT_OPEN", "SALES_CLOSED", "SOLD_OUT"])("rolls back %s", async (code) => {
+  it.each(["SALES_NOT_OPEN", "SALES_CLOSED", "SOLD_OUT"])("persists terminal %s without an entitlement", async (code) => {
     query.mockImplementation(async (sql: string) => {
       if (sql.includes("token_hash")) return { rows: [{ id: ownerId }] };
+      if (sql.includes("SELECT event_id, response")) return { rows: [{ event_id: event.id, response: null }] };
       if (sql.includes("FOR UPDATE")) return { rows: [{ id: event.id }] };
       if (sql.includes("SELECT CASE")) return { rows: [{ code }] };
       return { rows: [] };
     });
     expect(await expectResponse(await POST(request()), 409)).toMatchObject({ error: { code } });
-    expect(query).toHaveBeenLastCalledWith("ROLLBACK");
+    expect(query).toHaveBeenLastCalledWith("COMMIT");
     expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO lastresort.reservations"))).toBe(false);
   });
 

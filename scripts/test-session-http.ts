@@ -82,6 +82,7 @@ if (!databaseUrl) throw new Error("Set TEST_DATABASE_URL to a dedicated disposab
 const config = readConfig({ APP_ENV: "test", DATABASE_URL: databaseUrl });
 const pool = new Pool({ connectionString: databaseUrl, connectionTimeoutMillis: 3000 });
 let server: ChildProcess | undefined;
+let serverOutput = "";
 let createdTokenHash: string | undefined;
 let otherTokenHash: string | undefined;
 const bookingEventId = `http-booking-${randomUUID()}`;
@@ -114,8 +115,10 @@ try {
       NEXT_TELEMETRY_DISABLED: "1",
       NODE_ENV: "production",
     },
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "pipe"],
   });
+  server.stdout?.on("data", (chunk: Buffer) => { serverOutput += chunk.toString("utf8"); });
+  server.stderr?.on("data", (chunk: Buffer) => { serverOutput += chunk.toString("utf8"); });
 
   await waitForServer(server, port);
   const origin = `http://127.0.0.1:${port}`;
@@ -147,7 +150,7 @@ try {
   createdBookingFixture = true;
   async function postBooking(headers: Record<string, string> = {}, extraInput: Record<string, unknown> = {}) {
     return fetch(`${origin}/api/reservations`, {
-      method: "POST", headers: { Origin: origin, "Content-Type": "application/json", Cookie: cookie?.split(";")[0] ?? "", ...headers },
+      method: "POST", headers: { Origin: origin, "Content-Type": "application/json", "Idempotency-Key": randomUUID(), Cookie: cookie?.split(";")[0] ?? "", ...headers },
       body: JSON.stringify({ eventId: bookingEventId, quantity: 1, ...extraInput }),
       signal: AbortSignal.timeout(5000),
     });
@@ -155,7 +158,8 @@ try {
   for (const [headers, extraInput, expectedStatus] of [
     [{ Cookie: "" }, {}, 401],
     [{ Origin: "http://attacker.test" }, {}, 403],
-    [{ "Idempotency-Key": randomUUID() }, {}, 400],
+    [{ "Idempotency-Key": "invalid" }, {}, 400],
+    [{ "Idempotency-Key": "" }, {}, 400],
     [{}, { quantity: 2 }, 400],
     [{}, { ownerId: randomUUID() }, 400],
   ] satisfies [Record<string, string>, Record<string, unknown>, number][]) {
@@ -165,7 +169,8 @@ try {
   }
   assert.equal((await pool.query("SELECT remaining FROM lastresort.events WHERE id = $1", [bookingEventId])).rows[0].remaining, 1);
 
-  const booked = await postBooking();
+  const operationKey = randomUUID();
+  const booked = await postBooking({ "Idempotency-Key": operationKey });
   assert.equal(booked.status, 201);
   assert.equal(booked.headers.get("cache-control"), "no-store");
   const booking: unknown = await booked.json();
@@ -179,6 +184,16 @@ try {
   assert.equal(stored.rows.length, 1);
   assert.equal(stored.rows[0].reference, booking.reference);
   assert.equal(stored.rows[0].quantity, 1);
+  // Reordered JSON, whitespace and UUID letter case normalize to the same operation.
+  const replayed = await fetch(`${origin}/api/reservations`, {
+    method: "POST", headers: { Origin: origin, "Content-Type": "application/json", Cookie: cookie.split(";")[0], "Idempotency-Key": operationKey.toUpperCase() },
+    body: JSON.stringify({ quantity: 1, eventId: bookingEventId }, null, 2), signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(replayed.status, 200);
+  assert.deepEqual(await replayed.json(), booking);
+  const conflict = await postBooking({ "Idempotency-Key": operationKey }, { eventId: "different-event" });
+  assert.equal(conflict.status, 409);
+  assert.equal((await conflict.json()).error.code, "OPERATION_CONFLICT");
   const resultUrl = `${origin}/api/reservations/${String(booking.reference)}`;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const reopened: Response = await fetch(resultUrl, { headers: { Cookie: cookie.split(";")[0] } });
@@ -196,12 +211,50 @@ try {
   assert.equal(forbiddenRead.status, 404);
   assert.equal(missingRead.status, 404);
   assert.equal(await forbiddenRead.text(), await missingRead.text());
+  const otherOwnerAttempt = await postBooking({ Cookie: otherCookie, "Idempotency-Key": operationKey });
+  assert.equal(otherOwnerAttempt.status, 409);
+  assert.equal((await otherOwnerAttempt.json()).error.code, "SOLD_OUT");
   assert.equal((await pool.query("SELECT count(*)::int AS count FROM lastresort.reservations WHERE event_id = $1", [bookingEventId])).rows[0].count, 1);
   assert.equal((await postBooking()).status, 409);
   assert.equal((await pool.query("SELECT remaining FROM lastresort.events WHERE id = $1", [bookingEventId])).rows[0].remaining, 0);
-  process.stdout.write("Production-server session, atomic-booking and owned-result HTTP checks passed.\n");
+  const health = await fetch(`${origin}/api/health`);
+  assert.equal(health.status, 200);
+  await health.json();
+  await delay(100);
+  const logs: Record<string, unknown>[] = [];
+  for (const line of serverOutput.split("\n")) {
+    try {
+      const entry: unknown = JSON.parse(line);
+      if (typeof entry === "object" && entry !== null && "event" in entry && entry.event === "http_request") logs.push(Object.fromEntries(Object.entries(entry)));
+    } catch {}
+  }
+  function diagnostic(response: Response, outcome: string) {
+    const requestId = response.headers.get("x-request-id");
+    assert.ok(requestId && /^[0-9a-f-]{36}$/.test(requestId), "Expected server-generated request ID.");
+    const record = logs.find((entry) => entry.requestId === requestId);
+    assert.ok(record, "Expected a structured log matching the response request ID.");
+    assert.equal(record.status, response.status);
+    assert.equal(record.outcome, outcome);
+    assert.ok(typeof record.durationMs === "number" && record.durationMs >= 0);
+    return record;
+  }
+  const confirmedLog = diagnostic(booked, "confirmed");
+  const replayLog = diagnostic(replayed, "replayed");
+  const conflictLog = diagnostic(conflict, "OPERATION_CONFLICT");
+  const otherLog = diagnostic(otherOwnerAttempt, "SOLD_OUT");
+  diagnostic(health, "ready");
+  assert.ok(typeof confirmedLog.operationId === "string" && /^[0-9a-f]{64}$/.test(confirmedLog.operationId));
+  assert.equal(confirmedLog.operationId, replayLog.operationId);
+  assert.equal(confirmedLog.operationId, conflictLog.operationId);
+  assert.notEqual(confirmedLog.operationId, otherLog.operationId);
+  assert.notEqual(booked.headers.get("x-request-id"), replayed.headers.get("x-request-id"));
+  for (const secret of [token, operationKey, databaseUrl, otherCookie.split("=")[1]]) {
+    assert.ok(!JSON.stringify(logs).includes(secret), "Sensitive value appeared in structured HTTP logs.");
+  }
+  process.stdout.write("Production-server session, idempotent-booking, owned-result and structured-diagnostic HTTP checks passed.\n");
 } finally {
   if (createdBookingFixture) {
+    await pool.query("DELETE FROM lastresort.booking_operations WHERE event_id = $1", [bookingEventId]).catch(() => {});
     await pool.query("DELETE FROM lastresort.reservations WHERE event_id = $1", [bookingEventId]).catch(() => {});
     await pool.query("DELETE FROM lastresort.events WHERE id = $1", [bookingEventId]).catch(() => {});
   }

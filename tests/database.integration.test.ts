@@ -31,6 +31,15 @@ beforeAll(async () => {
 afterAll(async () => { await pool.end(); });
 
 describe("PostgreSQL foundation commands", () => {
+  it("reports unavailable when booking schema is missing even if events are readable (S2-07)", async () => {
+    await pool.query("ALTER TABLE lastresort.booking_operations RENAME TO booking_operations_unavailable_fixture");
+    try {
+      expect(await checkHealth((sql) => pool.query(sql))).toMatchObject({ status: 503 });
+    } finally {
+      await pool.query("ALTER TABLE lastresort.booking_operations_unavailable_fixture RENAME TO booking_operations");
+    }
+    expect(await checkHealth((sql) => pool.query(sql))).toMatchObject({ status: 200 });
+  });
   it("migrates repeatedly and seeds exactly one complete event", async () => {
     command("reset", "test", "--confirm-reset");
     command("migrate");
@@ -39,7 +48,7 @@ describe("PostgreSQL foundation commands", () => {
     const events = await pool.query("SELECT * FROM lastresort.events");
     expect(events.rows).toHaveLength(1);
     expect(events.rows[0]).toMatchObject({ id: "live-sessions-demo", capacity: 100, remaining: 100, price_minor: 0, venue: "Demo Hall", ticket_type: "General admission" });
-    expect((await pool.query("SELECT * FROM lastresort.migrations")).rows).toHaveLength(4);
+    expect((await pool.query("SELECT * FROM lastresort.migrations")).rows).toHaveLength(5);
     expect(await checkHealth((sql) => pool.query(sql))).toMatchObject({ status: 200 });
   });
   it("seed does not replenish inventory", async () => {
@@ -72,10 +81,15 @@ describe("PostgreSQL foundation commands", () => {
       `INSERT INTO lastresort.reservations (reference, guest_session_id, event_id, quantity, status)
        VALUES ($1, $2, 'live-sessions-demo', 1, 'confirmed')`, [randomUUID(), guest.session.ownerId],
     );
+    await pool.query(
+      `INSERT INTO lastresort.booking_operations (guest_session_id, operation_key, event_id, quantity, response)
+       VALUES ($1, $2, 'live-sessions-demo', 1, '{"code":"SOLD_OUT"}')`, [guest.session.ownerId, randomUUID()],
+    );
     command("reset", "test", "--confirm-reset");
     expect((await pool.query("SELECT remaining FROM lastresort.events")).rows[0].remaining).toBe(100);
     expect((await pool.query("SELECT id FROM lastresort.guest_sessions")).rows).toHaveLength(0);
     expect((await pool.query("SELECT reference FROM lastresort.reservations")).rows).toHaveLength(0);
+    expect((await pool.query("SELECT operation_key FROM lastresort.booking_operations")).rows).toHaveLength(0);
     expect((await pool.query("SELECT * FROM public.foundation_sentinel")).rows).toHaveLength(1);
     await pool.query("DROP TABLE public.foundation_sentinel");
   });
@@ -124,9 +138,9 @@ describe("PostgreSQL 17 atomic reservations", () => {
     ownerId = guest.session.ownerId;
   });
 
-  async function book(guestCookie = cookie, id = eventId) {
+  async function book(guestCookie = cookie, id = eventId, key: string = randomUUID()) {
     const client = await pool.connect();
-    try { return await reserveTicket(client, guestCookie, id); }
+    try { return await reserveTicket(client, guestCookie, id, key); }
     finally { client.release(); }
   }
 
@@ -191,7 +205,7 @@ describe("PostgreSQL 17 atomic reservations", () => {
         (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid,
       ));
       expect(new Set(contenderPids).size).toBe(2);
-      pending.push(...clients.map((client, index) => reserveTicket(client, cookies[index], eventId)));
+      pending.push(...clients.map((client, index) => reserveTicket(client, cookies[index], eventId, randomUUID())));
       await waitUntil(async () => {
         const waits = await pool.query("SELECT count(*)::int AS count FROM pg_stat_activity WHERE pid = ANY($1::int[]) AND wait_event_type = 'Lock'", [contenderPids]);
         return waits.rows[0].count === 2;
@@ -252,7 +266,7 @@ describe("PostgreSQL 17 atomic reservations", () => {
         const results: OperationResult[] = [];
         for (let operation = worker; operation < operationCount; operation += concurrency) {
           const guest = guests[operation];
-          const result = await reserveTicket(client, guest.setCookie.split(";")[0], eventId);
+          const result = await reserveTicket(client, guest.setCookie.split(";")[0], eventId, randomUUID());
           results.push({ ownerId: guest.session.ownerId, result });
           // Both quantities come from one committed MVCC snapshot, even while other workers write.
           const snapshot = await pool.query<{ remaining: number; capacity: number; confirmed: number }>(
@@ -310,19 +324,121 @@ describe("PostgreSQL 17 atomic reservations", () => {
     }
   }, 60_000);
 
-  it("rolls back the inventory decrement if the reservation insert fails, then permits a fresh booking", async () => {
+  it("replays the exact persisted result before current sale and event details (S2-03)", async () => {
+    const key = randomUUID();
+    const first = await book(cookie, eventId, key);
+    expect(first).toHaveProperty("reservation");
+    await pool.query("UPDATE lastresort.events SET name = 'Changed later', sale_closes_at = clock_timestamp() - interval '1 second' WHERE id = $1", [eventId]);
+    expect(await book(cookie, eventId, key.toUpperCase())).toEqual({ ...first, replayed: true });
+    await expectInventory(0, 1);
+    expect((await pool.query("SELECT response FROM lastresort.booking_operations WHERE guest_session_id = $1 AND operation_key = $2", [ownerId, key])).rows).toEqual([{ response: first }]);
+  });
+
+  it("serializes concurrent retries to the same committed reference (S2-03)", async () => {
+    const key = randomUUID();
+    const blocker = await pool.connect();
+    const clients = await Promise.all([pool.connect(), pool.connect()]);
+    let settled: Promise<PromiseSettledResult<Awaited<ReturnType<typeof reserveTicket>>>[]> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM lastresort.events WHERE id = $1 FOR UPDATE", [eventId]);
+      const pids = await Promise.all(clients.map(async (client) => (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid));
+      settled = Promise.allSettled(clients.map((client) => reserveTicket(client, cookie, eventId, key)));
+      await waitUntil(async () => (await pool.query("SELECT count(*)::int AS count FROM pg_stat_activity WHERE pid = ANY($1::int[]) AND wait_event_type = 'Lock'", [pids])).rows[0].count === 2);
+      await blocker.query("COMMIT");
+      const results = (await settled).map((result) => {
+        if (result.status === "rejected") throw result.reason;
+        return result.value;
+      });
+      expect(results.every((result) => "reservation" in result)).toBe(true);
+      expect(results.filter((result) => result.replayed)).toHaveLength(1);
+      expect(results.map((result) => "reservation" in result ? result.reservation.reference : null)[0]).toBe(
+        results.map((result) => "reservation" in result ? result.reservation.reference : null)[1],
+      );
+      expect((await pool.query("SELECT operation_key FROM lastresort.booking_operations WHERE guest_session_id = $1", [ownerId])).rows).toHaveLength(1);
+      await expectInventory(0, 1);
+    } finally {
+      await blocker.query("ROLLBACK");
+      if (settled) await settled;
+      clients.forEach((client) => client.release());
+      blocker.release();
+    }
+  }, 15_000);
+
+  it("rejects changed payloads and keeps the same key private to each owner (S2-03)", async () => {
+    await pool.query("UPDATE lastresort.events SET capacity = 2, remaining = 2 WHERE id = $1", [eventId]);
+    const key = randomUUID();
+    const first = await book(cookie, eventId, key);
+    if (!("reservation" in first)) throw new Error("Expected confirmation.");
+    expect(await book(cookie, "different-event", key)).toEqual({ code: "OPERATION_CONFLICT" });
+    const other = await createGuestSession((sql, values) => pool.query(sql, values));
+    const otherCookie = other.setCookie.split(";")[0];
+    const second = await book(otherCookie, eventId, key);
+    if (!("reservation" in second)) throw new Error("Expected independent confirmation.");
+    expect(second.reservation.reference).not.toBe(first.reservation.reference);
+    expect(await readReservation(pool, otherCookie, first.reservation.reference)).toEqual({ code: "NOT_FOUND" });
+    expect(await book(cookie, eventId, key)).toEqual({ ...first, replayed: true });
+    await expectInventory(0, 2);
+  }, 15_000);
+
+  it("keeps a lock-timeout retry on the original operation (S2-03)", async () => {
+    const key = randomUUID();
+    const original = await book(cookie, eventId, key);
+    const blocker = await pool.connect();
+    const retry = await pool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT operation_key FROM lastresort.booking_operations WHERE guest_session_id = $1 AND operation_key = $2 FOR UPDATE", [ownerId, key]);
+      await retry.query("SET statement_timeout = '150ms'");
+      await expect(reserveTicket(retry, cookie, eventId, key)).rejects.toMatchObject({ code: "57014" });
+      await blocker.query("COMMIT");
+      expect(await book(cookie, eventId, key)).toEqual({ ...original, replayed: true });
+      await expectInventory(0, 1);
+    } finally {
+      await blocker.query("ROLLBACK");
+      await retry.query("RESET statement_timeout");
+      blocker.release();
+      retry.release();
+    }
+  }, 15_000);
+
+  it.each(["SALES_NOT_OPEN", "SALES_CLOSED", "SOLD_OUT", "NOT_FOUND"])("retains terminal %s even after availability changes (S2-03)", async (code) => {
+    const key = randomUUID();
+    let target = eventId;
+    if (code === "SALES_NOT_OPEN") await pool.query("UPDATE lastresort.events SET sale_opens_at = clock_timestamp() + interval '1 hour' WHERE id = $1", [eventId]);
+    if (code === "SALES_CLOSED") await pool.query("UPDATE lastresort.events SET sale_closes_at = clock_timestamp() - interval '1 hour' WHERE id = $1", [eventId]);
+    if (code === "SOLD_OUT") expect(await book()).toHaveProperty("reservation");
+    if (code === "NOT_FOUND") target = `missing-${randomUUID()}`;
+    expect(await book(cookie, target, key)).toEqual({ code });
+    if (code === "NOT_FOUND") {
+      await pool.query(
+        `INSERT INTO lastresort.events SELECT $1, name, starts_at, venue, ticket_type, price_minor,
+          sale_opens_at, sale_closes_at, capacity, remaining FROM lastresort.events WHERE id = $2`, [target, eventId],
+      );
+    } else {
+      await pool.query("UPDATE lastresort.events SET sale_opens_at = clock_timestamp() - interval '1 day', sale_closes_at = clock_timestamp() + interval '1 day', capacity = capacity + 1, remaining = remaining + 1 WHERE id = $1", [eventId]);
+    }
+    const before = await pool.query("SELECT remaining FROM lastresort.events WHERE id = $1", [target]);
+    expect(await book(cookie, target, key)).toEqual({ code, replayed: true });
+    expect((await pool.query("SELECT remaining FROM lastresort.events WHERE id = $1", [target])).rows).toEqual(before.rows);
+    expect((await pool.query("SELECT response FROM lastresort.booking_operations WHERE guest_session_id = $1 AND operation_key = $2", [ownerId, key])).rows).toEqual([{ response: { code } }]);
+  }, 15_000);
+
+  it("rolls back the inventory and key if the reservation insert fails, then permits the same key", async () => {
+    const key = randomUUID();
     await pool.query(`CREATE FUNCTION lastresort.reject_booking_fixture() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN RAISE EXCEPTION 'Injected reservation storage failure'; END $$`);
     try {
       await pool.query(`CREATE TRIGGER reject_booking_fixture BEFORE INSERT ON lastresort.reservations
                        FOR EACH ROW EXECUTE FUNCTION lastresort.reject_booking_fixture()`);
-      await expect(book()).rejects.toThrow();
+      await expect(book(cookie, eventId, key)).rejects.toThrow();
       await expectInventory(1, 0);
+      expect((await pool.query("SELECT operation_key FROM lastresort.booking_operations WHERE guest_session_id = $1", [ownerId])).rows).toHaveLength(0);
     } finally {
       await pool.query("DROP TRIGGER IF EXISTS reject_booking_fixture ON lastresort.reservations");
       await pool.query("DROP FUNCTION lastresort.reject_booking_fixture()");
     }
-    expect(await book()).toHaveProperty("reservation");
+    expect(await book(cookie, eventId, key)).toHaveProperty("reservation");
     await expectInventory(0, 1);
   });
 
@@ -352,7 +468,7 @@ describe("PostgreSQL 17 atomic reservations", () => {
       const result = await reserveTicket({
         query: <Row extends QueryResultRow>(sql: string, values?: string[]) =>
           client.query<Row>(sql.replaceAll("clock_timestamp()", `TIMESTAMPTZ '${checkedAt}'`), values),
-      }, cookie, eventId);
+      }, cookie, eventId, randomUUID());
       if (expected === "confirmed") {
         expect(result).toHaveProperty("reservation");
         await expectInventory(0, 1);
@@ -373,7 +489,7 @@ describe("PostgreSQL 17 atomic reservations", () => {
       await blocker.query("BEGIN");
       await blocker.query("UPDATE lastresort.events SET sale_closes_at = clock_timestamp() + interval '500 milliseconds' WHERE id = $1", [eventId]);
       const pid = (await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
-      pending = reserveTicket(client, cookie, eventId);
+      pending = reserveTicket(client, cookie, eventId, randomUUID());
       await waitUntil(async () => (await pool.query("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))) AS waiting", [pid])).rows[0].waiting);
       await waitUntil(async () => (await blocker.query("SELECT clock_timestamp() >= sale_closes_at AS closed FROM lastresort.events WHERE id = $1", [eventId])).rows[0].closed);
       await blocker.query("COMMIT");
