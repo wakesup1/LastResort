@@ -15,8 +15,51 @@ type BookingOutcome = { reservation: Reservation } | { code: FailureCode };
 export type BookingResult = BookingOutcome & { replayed?: boolean };
 type EventRow = { id: string; name: string; starts_at: Date; venue: string; ticket_type: string };
 type BookingClient = {
-  query<Row extends QueryResultRow = QueryResultRow>(sql: string, values?: string[]): Promise<{ rows: Row[] }>;
+  query<Row extends QueryResultRow = QueryResultRow>(sql: string, values?: (string | null)[]): Promise<{ rows: Row[] }>;
 };
+
+export type ReservationHistory = { reservations: Reservation[]; nextCursor: string | null };
+export const HISTORY_PAGE_SIZE = 20;
+
+export async function readReservationHistory(
+  client: BookingClient,
+  cookieHeader: string | null,
+  before: string | null,
+): Promise<ReservationHistory | { code: "SESSION_REQUIRED" | "NOT_FOUND" }> {
+  const session = await resolveGuestSession((sql, values) => client.query(sql, values), cookieHeader);
+  if (!session) return { code: "SESSION_REQUIRED" };
+  if (before) {
+    const cursor = await client.query(
+      "SELECT reference FROM lastresort.reservations WHERE reference = $1 AND guest_session_id = $2",
+      [before, session.ownerId],
+    );
+    if (!cursor.rows[0]) return { code: "NOT_FOUND" };
+  }
+  const result = await client.query<EventRow & { reference: string; created_at: Date }>(
+    `WITH cursor AS (
+       SELECT created_at, reference FROM lastresort.reservations
+        WHERE reference = $2::uuid AND guest_session_id = $1
+     )
+     SELECT event.id, event.name, event.starts_at, event.venue, event.ticket_type,
+            reservation.reference, reservation.created_at
+       FROM lastresort.reservations AS reservation
+       JOIN lastresort.events AS event ON event.id = reservation.event_id
+      WHERE reservation.guest_session_id = $1
+        AND ($2::uuid IS NULL OR EXISTS (
+          SELECT 1 FROM cursor WHERE reservation.created_at < cursor.created_at
+            OR (reservation.created_at = cursor.created_at AND reservation.reference > cursor.reference)
+        ))
+      ORDER BY reservation.created_at DESC, reservation.reference ASC
+      LIMIT ${HISTORY_PAGE_SIZE + 1}`,
+    // Keep the cursor timestamp in PostgreSQL to preserve its full precision.
+    [session.ownerId, before],
+  );
+  const reservations: Reservation[] = result.rows.slice(0, HISTORY_PAGE_SIZE).map((row) => ({
+    reference: row.reference, status: "confirmed", quantity: 1, createdAt: row.created_at.toISOString(),
+    event: { eventId: row.id, name: row.name, startsAt: row.starts_at.toISOString(), venue: row.venue, ticketType: row.ticket_type },
+  }));
+  return { reservations, nextCursor: result.rows.length > HISTORY_PAGE_SIZE ? reservations.at(-1)?.reference ?? null : null };
+}
 
 export async function readReservation(
   client: BookingClient,
