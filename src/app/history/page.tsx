@@ -6,11 +6,14 @@ import { AppShell } from "../_components/app-shell.tsx";
 import { Icon, Notice, StatusBadge } from "../_components/ui.tsx";
 import { formatEventDate } from "../_lib/event-details.ts";
 import { loadHistoryPage, type HistoryPage } from "../_lib/history.ts";
+import { useBooking } from "../_hooks/use-booking.ts";
+import { BookingRecovery } from "../_components/booking-recovery.tsx";
 
 type HistoryState = HistoryPage & { kind: "loading" | "ready" | "error" | "session-required"; loadingMore: boolean };
 const emptyPage: HistoryPage = { reservations: [], nextCursor: null };
 
 export default function BookingHistory() {
+  const { booking, check } = useBooking();
   const [state, setState] = useState<HistoryState>({ ...emptyPage, kind: "loading", loadingMore: false });
   const active = useRef<AbortController | null>(null);
   const focusReference = useRef<string | null>(null);
@@ -45,6 +48,8 @@ export default function BookingHistory() {
     <h1 className="page-title">Booking history</h1>
     <p className="page-description">Find confirmed tickets booked in this browser, newest first.</p>
     <Notice title="Your tickets stay with this browser.">History uses your original guest cookies. Clearing cookies, an expired session or another browser cannot recover earlier bookings.</Notice>
+    <BookingRecovery booking={booking} onCheck={check} showHistory={false} />
+    {booking.kind === "rejected" && <div role="status"><Notice title="Original booking result found.">{booking.message}</Notice></div>}
     <div className="review-actions">
       <button type="button" className="button button-secondary" disabled={state.kind === "loading"} onClick={() => { void load(); }}><Icon name="refresh" /> Refresh history</button>
       <Link className="button button-secondary" href="/">Event details</Link>

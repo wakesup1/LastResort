@@ -6,6 +6,7 @@ import { createServer } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { Pool } from "pg";
 import { assertDisposableDatabase, readConfig } from "../src/server/config.ts";
+import { BOOKING_STORAGE_KEY, createBookingController } from "../src/app/_lib/booking.ts";
 
 type HttpResult = { status: number; headers: IncomingHttpHeaders; body: string };
 
@@ -169,8 +170,39 @@ try {
   }
   assert.equal((await pool.query("SELECT remaining FROM lastresort.events WHERE id = $1", [bookingEventId])).rows[0].remaining, 1);
 
-  const operationKey = randomUUID();
-  const booked = await postBooking({ "Idempotency-Key": operationKey });
+  // Lose the first response after the real production server has committed.
+  // Recreate the browser controller with its persisted marker, then explicitly read the result.
+  const browserValues = new Map<string, string>();
+  const browserStorage = {
+    getItem: (key: string) => browserValues.get(key) ?? null,
+    setItem: (key: string, value: string) => { browserValues.set(key, value); },
+    removeItem: (key: string) => { browserValues.delete(key); },
+  };
+  const captured: { booked?: Response } = {};
+  const recoveryRequests: string[] = [];
+  const browserSend: typeof fetch = async (url, options) => {
+    const path = String(url);
+    recoveryRequests.push(`${options?.method ?? "GET"} ${path}`);
+    const headers = new Headers(options?.headers);
+    headers.set("Origin", origin);
+    headers.set("Cookie", cookie.split(";")[0]);
+    const response = await fetch(`${origin}${path}`, {
+      ...options,
+      headers,
+    });
+    if (path === "/api/reservations" && options?.method === "POST") {
+      captured.booked = response;
+      throw new TypeError("Simulated response loss after commit");
+    }
+    return response;
+  };
+  assert.deepEqual(await createBookingController(browserStorage, browserSend).confirm(bookingEventId), { kind: "unknown" });
+  const savedOperation: unknown = JSON.parse(browserStorage.getItem(BOOKING_STORAGE_KEY) ?? "{}");
+  assert.ok(typeof savedOperation === "object" && savedOperation !== null && "operationId" in savedOperation && typeof savedOperation.operationId === "string");
+  const operationKey = savedOperation.operationId;
+  assert.match(operationKey, /^[0-9a-f-]{36}$/);
+  const booked = captured.booked;
+  assert.ok(booked);
   assert.equal(booked.status, 201);
   assert.equal(booked.headers.get("cache-control"), "no-store");
   const booking: unknown = await booked.json();
@@ -184,6 +216,13 @@ try {
   assert.equal(stored.rows.length, 1);
   assert.equal(stored.rows[0].reference, booking.reference);
   assert.equal(stored.rows[0].quantity, 1);
+  const reloaded = createBookingController(browserStorage, browserSend);
+  assert.deepEqual(reloaded.restore(), { kind: "unknown" });
+  assert.equal(recoveryRequests.length, 2, "Reload must not submit or check automatically.");
+  assert.deepEqual(await reloaded.check(), { kind: "confirmed", reference: booking.reference });
+  assert.deepEqual(recoveryRequests, ["POST /api/session", "POST /api/reservations", `GET /api/booking-operations/${operationKey}`]);
+  assert.equal((await pool.query("SELECT count(*)::int AS count FROM lastresort.reservations WHERE event_id=$1", [bookingEventId])).rows[0].count, 1);
+  assert.equal((await pool.query("SELECT remaining FROM lastresort.events WHERE id=$1", [bookingEventId])).rows[0].remaining, 0);
   // Reordered JSON, whitespace and UUID letter case normalize to the same operation.
   const replayed = await fetch(`${origin}/api/reservations`, {
     method: "POST", headers: { Origin: origin, "Content-Type": "application/json", Cookie: cookie.split(";")[0], "Idempotency-Key": operationKey.toUpperCase() },
@@ -206,6 +245,19 @@ try {
   const otherCookie = otherSession.headers["set-cookie"]?.[0]?.split(";")[0];
   assert.ok(otherCookie);
   otherTokenHash = createHash("sha256").update(otherCookie.split("=")[1], "utf8").digest("hex");
+  const operationUrl = `${origin}/api/booking-operations/${operationKey}`;
+  const recovered = await fetch(operationUrl, { headers: { Cookie: cookie.split(";")[0] } });
+  assert.equal(recovered.status, 200);
+  assert.equal(recovered.headers.get("cache-control"), "no-store");
+  assert.equal(recovered.headers.has("set-cookie"), false);
+  assert.deepEqual(await recovered.json(), { eventId: bookingEventId, outcome: { reservation: booking } });
+  assert.equal((await fetch(operationUrl)).status, 401);
+  assert.equal((await fetch(`${operationUrl}?ownerId=forged`)).status, 400);
+  const hiddenOperation = await fetch(operationUrl, { headers: { Cookie: otherCookie } });
+  const missingOperation = await fetch(`${origin}/api/booking-operations/${randomUUID()}`, { headers: { Cookie: otherCookie } });
+  assert.equal(hiddenOperation.status, 404);
+  assert.equal(missingOperation.status, 404);
+  assert.equal(await hiddenOperation.text(), await missingOperation.text());
   const forbiddenRead = await fetch(resultUrl, { headers: { Cookie: otherCookie } });
   const missingRead = await fetch(`${origin}/api/reservations/${randomUUID()}`, { headers: { Cookie: cookie.split(";")[0] } });
   assert.equal(forbiddenRead.status, 404);
@@ -290,7 +342,7 @@ try {
   assert.deepEqual(await (await history("", otherCookie)).json(), { reservations: [], nextCursor: null });
   assert.equal((await pool.query("SELECT count(*)::int AS count FROM lastresort.reservations WHERE event_id=$1", [bookingEventId])).rows[0].count, 23);
   assert.equal((await pool.query("SELECT remaining FROM lastresort.events WHERE id=$1", [bookingEventId])).rows[0].remaining, 0);
-  process.stdout.write("Production-server session, idempotent-booking, owned-result, history and structured-diagnostic HTTP checks passed.\n");
+  process.stdout.write("Production-server session, idempotent-booking, response-loss recovery, owned-result, history and structured-diagnostic HTTP checks passed.\n");
 } finally {
   if (createdBookingFixture) {
     await pool.query("DELETE FROM lastresort.booking_operations WHERE event_id = $1", [bookingEventId]).catch(() => {});
