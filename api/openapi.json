@@ -11,6 +11,129 @@
     }
   ],
   "paths": {
+    "/api/booking-operations/{operationKey}": {
+      "get": {
+        "operationId": "getBookingOperation",
+        "summary": "Check the original booking outcome without resubmitting",
+        "description": "S2-06: read only, scoped to the valid original guest cookie and UUID operation key. Returns the persisted outcome, including the original reservation snapshot or terminal business rejection. Never creates a session, operation or reservation and never changes inventory. Recovery works after sale closure or sell-out. Unknown, uncommitted and cross-owner operations share the same 404; absence does not prove failure and must not trigger a new booking. Retain the original operation across unavailable responses and reloads. No query parameters. Clearing or replacing guest cookies cannot recover the original owner.",
+        "x-implementation": "implemented",
+        "security": [
+          {
+            "guestSessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "operationKey",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "example": "7b013fc7-c29f-428e-98ea-04cbe234e917"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The original persisted booking outcome, not a new booking.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingOperationResult"
+                },
+                "example": {
+                  "eventId": "live-sessions-demo",
+                  "outcome": {
+                    "reservation": {
+                      "reference": "6bda9f21-c452-44fa-9468-f34f59159f31",
+                      "status": "confirmed",
+                      "quantity": 1,
+                      "createdAt": "2026-10-20T10:00:00Z",
+                      "event": {
+                        "eventId": "live-sessions-demo",
+                        "name": "Live Sessions (Demo)",
+                        "startsAt": "2026-11-21T12:00:00Z",
+                        "venue": "Demo Hall",
+                        "ticketType": "General admission"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/SessionRequired"
+          },
+          "404": {
+            "description": "No completed operation visible to this session. Outcome remains unknown.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "NOT_FOUND",
+                    "message": "No completed operation is available for this session. The booking outcome remains unknown."
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Checking failed. Keep the original operation and retry this read.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "SERVICE_UNAVAILABLE",
+                    "message": "The booking outcome could not be loaded. Try checking it again."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/session": {
       "post": {
         "operationId": "createOrResumeGuestSession",
@@ -548,6 +671,55 @@
       }
     },
     "schemas": {
+      "BookingOperationResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "eventId",
+          "outcome"
+        ],
+        "properties": {
+          "eventId": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "maxLength": 100
+          },
+          "outcome": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "reservation"
+                ],
+                "properties": {
+                  "reservation": {
+                    "$ref": "#/components/schemas/Reservation"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "code"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "NOT_FOUND",
+                      "SALES_NOT_OPEN",
+                      "SALES_CLOSED",
+                      "SOLD_OUT"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
       "HealthReady": {
         "type": "object",
         "additionalProperties": false,

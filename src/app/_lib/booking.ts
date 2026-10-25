@@ -7,7 +7,8 @@ export type BookingState =
   | { kind: "loading" }
   | { kind: "ready" }
   | { kind: "pending" }
-  | { kind: "unknown" }
+  | { kind: "checking" }
+  | { kind: "unknown"; message?: string }
   | { kind: "blocked" }
   | { kind: "rejected"; message: string }
   | { kind: "confirmed"; reference: string };
@@ -36,7 +37,7 @@ const rejectionMessages: Record<string, string> = {
   ORIGIN_FORBIDDEN: "The booking request was rejected. No ticket was reserved.",
 };
 
-// Persist the key before sending. Unknown outcomes stay blocked until explicit recovery is implemented.
+// Persist the key before sending. Recovery only reads the original owner's stored outcome.
 export function createBookingController(storage: Pick<Storage, "getItem" | "setItem" | "removeItem">, send: typeof fetch = fetch) {
   let sending = false;
   function restore(): BookingState {
@@ -51,6 +52,43 @@ export function createBookingController(storage: Pick<Storage, "getItem" | "setI
   }
   return {
     restore,
+    async check(): Promise<BookingState> {
+      if (sending) return { kind: "checking" };
+      const prior = restore();
+      if (prior.kind !== "unknown") return prior;
+      sending = true;
+      try {
+        const operation: unknown = JSON.parse(storage.getItem(BOOKING_STORAGE_KEY) ?? "null");
+        if (typeof operation !== "object" || operation === null ||
+            !("protocol" in operation) || operation.protocol !== "idempotent-v1" ||
+            !("operationId" in operation) || typeof operation.operationId !== "string" || !UUID_PATTERN.test(operation.operationId) ||
+            !("eventId" in operation) || typeof operation.eventId !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(operation.eventId) || operation.eventId.length > 100) {
+          return { kind: "unknown", message: "This saved request cannot be checked safely. Use Booking history in this browser and keep any original result link." };
+        }
+        const response = await send(`/api/booking-operations/${encodeURIComponent(operation.operationId)}`, {
+          method: "GET", cache: "no-store", credentials: "same-origin", signal: AbortSignal.timeout(10000),
+        });
+        if (response.status === 401) return { kind: "unknown", message: "This browser cannot access the original request. Use the original browser with its original cookies. No new booking was sent." };
+        if (response.status === 404) return { kind: "unknown", message: "No completed result was found for this browser yet. This does not prove the booking failed. Check again or read Booking history." };
+        if (!response.ok) throw new Error("Outcome unavailable");
+        const payload: unknown = await response.json();
+        if (typeof payload !== "object" || payload === null || !("eventId" in payload) || payload.eventId !== operation.eventId ||
+            !("outcome" in payload) || typeof payload.outcome !== "object" || payload.outcome === null) throw new Error("Invalid outcome");
+        const outcome = payload.outcome;
+        if (Object.keys(outcome).length !== 1) throw new Error("Ambiguous outcome");
+        if ("reservation" in outcome && isReservation(outcome.reservation) && outcome.reservation.event.eventId === operation.eventId) {
+          try { storage.setItem(BOOKING_STORAGE_KEY, JSON.stringify({ ...operation, reference: outcome.reservation.reference })); } catch {}
+          return { kind: "confirmed", reference: outcome.reservation.reference };
+        }
+        if ("code" in outcome && typeof outcome.code === "string" && ["NOT_FOUND", "SALES_NOT_OPEN", "SALES_CLOSED", "SOLD_OUT"].includes(outcome.code)) {
+          storage.removeItem(BOOKING_STORAGE_KEY);
+          return { kind: "rejected", message: rejectionMessages[outcome.code] };
+        }
+        throw new Error("Invalid outcome");
+      } catch {
+        return { kind: "unknown", message: "The result could not be checked. Your request may have completed. Try checking again; no new booking was sent." };
+      } finally { sending = false; }
+    },
     async confirm(eventId: string): Promise<BookingState> {
       if (sending) return { kind: "pending" };
       const prior = restore();

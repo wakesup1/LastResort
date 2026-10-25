@@ -8,19 +8,19 @@ import { Icon, Notice, StatusBadge } from "../_components/ui.tsx";
 import { useEventDetails } from "../_hooks/use-event-details.ts";
 import { saleStatusCopy } from "../_lib/event-details.ts";
 import { useBooking } from "../_hooks/use-booking.ts";
+import { BookingRecovery } from "../_components/booking-recovery.tsx";
 
 export default function ReviewBooking() {
   const { state, refresh } = useEventDetails();
-  const { booking, confirm } = useBooking();
+  const { booking, confirm, check } = useBooking();
   const canConfirm = (booking.kind === "ready" || booking.kind === "rejected") && state.kind === "ready" && state.freshness === "current" && state.event.saleStatus === "open";
 
   return (
     <AppShell>
-      <div className="reading-container booking-feedback" aria-live="polite" aria-atomic="true">
-        {booking.kind === "pending" && <Notice title="Confirming reservation…">Keep this page open. Your ticket is confirmed only when the server returns a result.</Notice>}
-        {booking.kind === "unknown" && <Notice tone="warning" title="Your booking outcome is unknown.">A ticket may already be reserved. Do not confirm again, including in another tab. Automatic recovery is not available yet.</Notice>}
-        {booking.kind === "blocked" && <Notice tone="warning" title="Booking is unavailable in this tab.">We could not safely read the saved booking state. Keep any existing result link; do not clear browser data to retry an uncertain booking.</Notice>}
-        {booking.kind === "confirmed" && <Notice title="Your reservation was confirmed."><Link href={`/reservations/${booking.reference}`}>Open your original booking result</Link></Notice>}
+      <div className="reading-container booking-feedback">
+        {booking.kind === "pending" && <div role="status"><Notice title="Confirming reservation…">Keep this page open. Your ticket is confirmed only when the server returns a result.</Notice></div>}
+        <BookingRecovery booking={booking} onCheck={check} />
+        {booking.kind === "confirmed" && <div role="status"><Notice title="Your reservation was confirmed."><Link href={`/reservations/${booking.reference}`}>Open your original booking result</Link></Notice></div>}
       </div>
       {booking.kind === "rejected" && <div className="reading-container booking-feedback" role="alert"><Notice tone="warning" title="Reservation not completed.">{booking.message}</Notice></div>}
       <EventState state={state} onRetry={refresh}>

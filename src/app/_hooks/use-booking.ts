@@ -16,6 +16,13 @@ export function useBooking() {
   }, []);
   return {
     booking,
+    check: async () => {
+      if (!controller.current) return;
+      setBooking({ kind: "checking" });
+      const result = await controller.current.check();
+      setBooking(result);
+      if (result.kind === "confirmed") router.push(`/reservations/${result.reference}`);
+    },
     confirm: async (eventId: string) => {
       if (!controller.current) return;
       setBooking({ kind: "pending" });

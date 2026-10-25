@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { assertDisposableDatabase } from "../src/server/config.ts";
 import { checkHealth } from "../src/server/health.ts";
 import { createGuestSession, GUEST_SESSION_COOKIE_NAME, resolveGuestSession } from "../src/server/guest-session.ts";
-import { readReservation, readReservationHistory, reserveTicket } from "../src/server/reservations.ts";
+import { readBookingOperation, readReservation, readReservationHistory, reserveTicket } from "../src/server/reservations.ts";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("Missing configuration: TEST_DATABASE_URL (dedicated lastresort_test database required)");
@@ -194,6 +194,56 @@ describe("PostgreSQL 17 atomic reservations", () => {
     try { return await reserveTicket(client, guestCookie, id, key); }
     finally { client.release(); }
   }
+
+  it("recovers a committed operation on a separate connection after response loss, even after sale closure (S2-06)", async () => {
+    const key = randomUUID();
+    const original = await book(cookie, eventId, key);
+    if (!("reservation" in original)) throw new Error("Expected confirmed fixture");
+    await pool.query("UPDATE lastresort.events SET name='Changed after booking', sale_closes_at=clock_timestamp() - interval '1 second' WHERE id=$1", [eventId]);
+    const reader = await pool.connect();
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        expect(await readBookingOperation(reader, cookie, key)).toEqual({ eventId, outcome: original });
+      }
+      const other = await createGuestSession((sql, values) => pool.query(sql, values));
+      expect(await readBookingOperation(reader, other.setCookie.split(";")[0], key)).toEqual({ code: "NOT_FOUND" });
+      expect(await readBookingOperation(reader, cookie, randomUUID())).toEqual({ code: "NOT_FOUND" });
+      expect(await readBookingOperation(reader, null, key)).toEqual({ code: "SESSION_REQUIRED" });
+      expect(await readReservationHistory(reader, cookie, null)).toMatchObject({ reservations: [{ reference: original.reservation.reference }] });
+      await expectInventory(0, 1);
+      expect((await pool.query("SELECT count(*)::int AS count FROM lastresort.booking_operations WHERE event_id=$1", [eventId])).rows[0].count).toBe(1);
+      await pool.query("UPDATE lastresort.guest_sessions SET created_at=now()-interval '2 seconds', expires_at=now()-interval '1 second' WHERE id=$1", [ownerId]);
+      expect(await readBookingOperation(reader, cookie, key)).toEqual({ code: "SESSION_REQUIRED" });
+    } finally { reader.release(); }
+  });
+
+  it("does not mistake an uncommitted or rolled-back operation for a known failure (S2-06)", async () => {
+    const writer = await pool.connect();
+    const key = randomUUID();
+    try {
+      await writer.query("BEGIN");
+      await writer.query(
+        "INSERT INTO lastresort.booking_operations (guest_session_id, operation_key, event_id, quantity, response) VALUES ($1, $2, $3, 1, $4::jsonb)",
+        [ownerId, key, eventId, JSON.stringify({ code: "SOLD_OUT" })],
+      );
+      expect(await readBookingOperation(pool, cookie, key)).toEqual({ code: "NOT_FOUND" });
+      await writer.query("ROLLBACK");
+      expect(await readBookingOperation(pool, cookie, key)).toEqual({ code: "NOT_FOUND" });
+      await expectInventory(1, 0);
+    } finally { await writer.query("ROLLBACK"); writer.release(); }
+  });
+
+  it.each(["NOT_FOUND", "SALES_NOT_OPEN", "SALES_CLOSED", "SOLD_OUT"])("recovers the persisted %s rejection without writing (S2-06)", async (code) => {
+    const key = randomUUID();
+    if (code === "SALES_NOT_OPEN") await pool.query("UPDATE lastresort.events SET sale_opens_at=clock_timestamp()+interval '1 hour' WHERE id=$1", [eventId]);
+    if (code === "SALES_CLOSED") await pool.query("UPDATE lastresort.events SET sale_closes_at=clock_timestamp()-interval '1 second' WHERE id=$1", [eventId]);
+    if (code === "SOLD_OUT") await book();
+    const target = code === "NOT_FOUND" ? "missing-event" : eventId;
+    expect(await book(cookie, target, key)).toEqual({ code });
+    const before = await pool.query("SELECT remaining FROM lastresort.events WHERE id=$1", [eventId]);
+    expect(await readBookingOperation(pool, cookie, key)).toEqual({ eventId: target, outcome: { code } });
+    expect(await pool.query("SELECT remaining FROM lastresort.events WHERE id=$1", [eventId])).toMatchObject({ rows: before.rows });
+  });
 
   async function expectInventory(remaining: number, confirmed: number) {
     const result = await pool.query(
