@@ -1,6 +1,6 @@
 import { getPool } from "../../../server/database.ts";
 import { forbiddenOrigin, invalidRequest, isSameOriginRequest } from "../../../server/http.ts";
-import { reserveTicket } from "../../../server/reservations.ts";
+import { readReservationHistory, reserveTicket } from "../../../server/reservations.ts";
 import { withRequestDiagnostics, type RequestDiagnostics } from "../../../server/diagnostics.ts";
 
 export const runtime = "nodejs";
@@ -13,6 +13,24 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 
 function errorResponse(status: number, code: string, message: string) {
   return Response.json({ error: { code, message } }, { status, headers: noStore });
+}
+
+export async function GET(request: Request) {
+  const params = new URL(request.url).searchParams;
+  const before = params.get("before");
+  if ([...params.keys()].some((key) => key !== "before") || params.getAll("before").length > 1 ||
+      (before !== null && !UUID_PATTERN.test(before))) {
+    return invalidRequest("Provide only one valid UUID before cursor, or no query parameters.");
+  }
+  try {
+    const result = await readReservationHistory(getPool(), request.headers.get("cookie"), before);
+    if (!("code" in result)) return Response.json(result, { headers: noStore });
+    return result.code === "SESSION_REQUIRED"
+      ? errorResponse(401, result.code, "A valid guest session is required.")
+      : errorResponse(404, result.code, "The resource does not exist or does not belong to this session.");
+  } catch {
+    return errorResponse(503, "SERVICE_UNAVAILABLE", "Booking history could not be loaded. Try reading it again.");
+  }
 }
 
 async function readBookingInput(request: Request): Promise<string | null> {

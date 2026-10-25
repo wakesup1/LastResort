@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { assertDisposableDatabase } from "../src/server/config.ts";
 import { checkHealth } from "../src/server/health.ts";
 import { createGuestSession, GUEST_SESSION_COOKIE_NAME, resolveGuestSession } from "../src/server/guest-session.ts";
-import { readReservation, reserveTicket } from "../src/server/reservations.ts";
+import { readReservation, readReservationHistory, reserveTicket } from "../src/server/reservations.ts";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("Missing configuration: TEST_DATABASE_URL (dedicated lastresort_test database required)");
@@ -136,6 +136,57 @@ describe("PostgreSQL 17 atomic reservations", () => {
     const guest = await createGuestSession((sql, values) => pool.query(sql, values));
     cookie = guest.setCookie.split(";")[0];
     ownerId = guest.session.ownerId;
+  });
+
+  it("lists several operations once, isolates other owners and rejects expired sessions (S2-05)", async () => {
+    await pool.query("UPDATE lastresort.events SET capacity=4, remaining=4 WHERE id=$1", [eventId]);
+    const client = await pool.connect();
+    try {
+      const key = randomUUID();
+      const first = await reserveTicket(client, cookie, eventId, key);
+      expect(await reserveTicket(client, cookie, eventId, key)).toMatchObject({ ...first, replayed: true });
+      const second = await reserveTicket(client, cookie, eventId, randomUUID());
+      const other = await createGuestSession((sql, values) => pool.query(sql, values));
+      const otherCookie = other.setCookie.split(";")[0];
+      expect(await readReservationHistory(pool, otherCookie, null)).toEqual({ reservations: [], nextCursor: null });
+      const otherBooking = await reserveTicket(client, otherCookie, eventId, randomUUID());
+      const history = await readReservationHistory(pool, cookie, null);
+      if (!("reservations" in history) || !("reservation" in first) || !("reservation" in second) || !("reservation" in otherBooking)) throw new Error("Expected confirmed fixture");
+      expect(history.reservations).toEqual([second.reservation, first.reservation]);
+      expect(history.nextCursor).toBeNull();
+      for (const item of history.reservations) expect(await readReservation(pool, cookie, item.reference)).toEqual({ reservation: item });
+      expect(await readReservationHistory(pool, cookie, otherBooking.reservation.reference)).toEqual({ code: "NOT_FOUND" });
+      expect(await readReservationHistory(pool, cookie, randomUUID())).toEqual({ code: "NOT_FOUND" });
+      expect(await readReservationHistory(pool, null, null)).toEqual({ code: "SESSION_REQUIRED" });
+      expect((await pool.query("SELECT remaining FROM lastresort.events WHERE id=$1", [eventId])).rows[0].remaining).toBe(1);
+      expect((await pool.query("SELECT count(*)::int AS count FROM lastresort.reservations WHERE event_id=$1", [eventId])).rows[0].count).toBe(3);
+      await pool.query("UPDATE lastresort.guest_sessions SET created_at=now()-interval '2 seconds', expires_at=now()-interval '1 second' WHERE id=$1", [ownerId]);
+      expect(await readReservationHistory(pool, cookie, null)).toEqual({ code: "SESSION_REQUIRED" });
+    } finally { client.release(); }
+  }, 15_000);
+
+  it("pages tied and sub-millisecond timestamps without duplicates or omissions (S2-05)", async () => {
+    // Construct a consistent persisted fixture, including timestamps JS Date cannot distinguish.
+    await pool.query("UPDATE lastresort.events SET capacity=45, remaining=0 WHERE id=$1", [eventId]);
+    await pool.query(
+      `INSERT INTO lastresort.reservations (reference, guest_session_id, event_id, quantity, status, created_at)
+       SELECT gen_random_uuid(), $1, $2, 1, 'confirmed',
+              '2026-10-21 09:00:00+00'::timestamptz + (n / 3) * interval '1 microsecond'
+         FROM generate_series(1, 45) AS n`, [ownerId, eventId],
+    );
+    const expected = await pool.query("SELECT reference FROM lastresort.reservations WHERE guest_session_id=$1 ORDER BY created_at DESC, reference ASC", [ownerId]);
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 3; page += 1) {
+      const result = await readReservationHistory(pool, cookie, cursor);
+      if (!("reservations" in result)) throw new Error("Expected owned history");
+      expect(result.reservations).toHaveLength(page < 2 ? 20 : 5);
+      seen.push(...result.reservations.map((item) => item.reference));
+      cursor = result.nextCursor;
+      expect(cursor === null).toBe(page === 2);
+    }
+    expect(seen).toEqual(expected.rows.map((row: { reference: string }) => row.reference));
+    expect(new Set(seen).size).toBe(45);
   });
 
   async function book(guestCookie = cookie, id = eventId, key: string = randomUUID()) {

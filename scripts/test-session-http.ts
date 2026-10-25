@@ -251,7 +251,46 @@ try {
   for (const secret of [token, operationKey, databaseUrl, otherCookie.split("=")[1]]) {
     assert.ok(!JSON.stringify(logs).includes(secret), "Sensitive value appeared in structured HTTP logs.");
   }
-  process.stdout.write("Production-server session, idempotent-booking, owned-result and structured-diagnostic HTTP checks passed.\n");
+  async function history(suffix = "", ownerCookie = cookie?.split(";")[0] ?? "") {
+    const response = await fetch(`${origin}/api/reservations${suffix}`, { headers: { Cookie: ownerCookie } });
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.has("set-cookie"), false);
+    return response;
+  }
+  assert.equal((await history("", "")).status, 401);
+  assert.equal((await history("?ownerId=forged")).status, 400);
+  assert.deepEqual(await (await history("", otherCookie)).json(), { reservations: [], nextCursor: null });
+  assert.deepEqual(await (await history()).json(), { reservations: [booking], nextCursor: null });
+  const otherCursor = await history(`?before=${String(booking.reference)}`, otherCookie);
+  const unknownCursor = await history(`?before=${randomUUID()}`, otherCookie);
+  assert.equal(otherCursor.status, 404);
+  assert.equal(unknownCursor.status, 404);
+  assert.equal(await otherCursor.text(), await unknownCursor.text());
+  // Consistent multi-page persisted fixture; the actual booking/retry above remains one row.
+  await pool.query("UPDATE lastresort.events SET capacity=23 WHERE id=$1", [bookingEventId]);
+  await pool.query(
+    `INSERT INTO lastresort.reservations (reference, guest_session_id, event_id, quantity, status, created_at)
+     SELECT gen_random_uuid(), owner.id, $1, 1, 'confirmed', clock_timestamp() - interval '1 day'
+       FROM lastresort.guest_sessions AS owner CROSS JOIN generate_series(1, 22)
+      WHERE owner.token_hash=$2`, [bookingEventId, createdTokenHash],
+  );
+  const firstPage = await (await history()).json();
+  assert.equal(firstPage.reservations.length, 20);
+  assert.ok(firstPage.nextCursor);
+  const secondPage = await (await history(`?before=${firstPage.nextCursor}`)).json();
+  assert.equal(secondPage.reservations.length, 3);
+  assert.equal(secondPage.nextCursor, null);
+  const references = [...firstPage.reservations, ...secondPage.reservations].map((item: { reference: string }) => item.reference);
+  assert.equal(new Set(references).size, 23);
+  for (const reference of [references[0], references.at(-1)]) {
+    const detail: Response = await fetch(`${origin}/api/reservations/${reference}`, { headers: { Cookie: cookie.split(";")[0] } });
+    assert.equal(detail.status, 200);
+    assert.equal((await detail.json()).reference, reference);
+  }
+  assert.deepEqual(await (await history("", otherCookie)).json(), { reservations: [], nextCursor: null });
+  assert.equal((await pool.query("SELECT count(*)::int AS count FROM lastresort.reservations WHERE event_id=$1", [bookingEventId])).rows[0].count, 23);
+  assert.equal((await pool.query("SELECT remaining FROM lastresort.events WHERE id=$1", [bookingEventId])).rows[0].remaining, 0);
+  process.stdout.write("Production-server session, idempotent-booking, owned-result, history and structured-diagnostic HTTP checks passed.\n");
 } finally {
   if (createdBookingFixture) {
     await pool.query("DELETE FROM lastresort.booking_operations WHERE event_id = $1", [bookingEventId]).catch(() => {});
