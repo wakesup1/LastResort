@@ -12,6 +12,7 @@ export type Reservation = {
 
 type FailureCode = "SESSION_REQUIRED" | "NOT_FOUND" | "SALES_NOT_OPEN" | "SALES_CLOSED" | "SOLD_OUT" | "OPERATION_CONFLICT";
 type BookingOutcome = { reservation: Reservation } | { code: FailureCode };
+export type StoredBookingOutcome = { eventId: string; outcome: BookingOutcome };
 export type BookingResult = BookingOutcome & { replayed?: boolean };
 type EventRow = { id: string; name: string; starts_at: Date; venue: string; ticket_type: string };
 type BookingClient = {
@@ -20,6 +21,24 @@ type BookingClient = {
 
 export type ReservationHistory = { reservations: Reservation[]; nextCursor: string | null };
 export const HISTORY_PAGE_SIZE = 20;
+
+export async function readBookingOperation(
+  client: BookingClient,
+  cookieHeader: string | null,
+  operationKey: string,
+): Promise<StoredBookingOutcome | { code: "SESSION_REQUIRED" | "NOT_FOUND" }> {
+  const session = await resolveGuestSession((sql, values) => client.query(sql, values), cookieHeader);
+  if (!session) return { code: "SESSION_REQUIRED" };
+  const result = await client.query<{ event_id: string; response: BookingOutcome | null }>(
+    `SELECT event_id, response FROM lastresort.booking_operations
+      WHERE guest_session_id = $1 AND operation_key = $2`,
+    [session.ownerId, operationKey],
+  );
+  const row = result.rows[0];
+  // An absent/uncommitted operation is unknown, never proof that a new purchase is safe.
+  if (!row?.response) return { code: "NOT_FOUND" };
+  return { eventId: row.event_id, outcome: row.response };
+}
 
 export async function readReservationHistory(
   client: BookingClient,
