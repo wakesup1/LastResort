@@ -48,5 +48,16 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run test:integration
+        env:
+          LASTRESORT_CONCURRENCY_REPORT_DIR: test-results/concurrency/integration
+      - run: npm run test:concurrency
+      - name: Retain concurrency evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: concurrency-evidence-${{ github.run_attempt }}
+          path: test-results/concurrency/
+          if-no-files-found: ignore
+          retention-days: 14
       - run: npm run build
       - run: npm run test:http
