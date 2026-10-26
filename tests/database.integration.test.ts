@@ -5,6 +5,7 @@ import { Pool, type PoolClient, type QueryResultRow } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { assertDisposableDatabase } from "../src/server/config.ts";
 import { checkHealth } from "../src/server/health.ts";
+import { createCaseEvidence, saveCaseEvidence, type CaseEvidence, type InventorySnapshot } from "../scripts/concurrency-evidence.ts";
 import { createGuestSession, GUEST_SESSION_COOKIE_NAME, resolveGuestSession } from "../src/server/guest-session.ts";
 import { readBookingOperation, readReservation, readReservationHistory, reserveTicket } from "../src/server/reservations.ts";
 
@@ -245,11 +246,12 @@ describe("PostgreSQL 17 atomic reservations", () => {
     expect(await pool.query("SELECT remaining FROM lastresort.events WHERE id=$1", [eventId])).toMatchObject({ rows: before.rows });
   });
 
-  async function expectInventory(remaining: number, confirmed: number) {
-    const result = await pool.query(
+  async function expectInventory(remaining: number, confirmed: number, evidence?: CaseEvidence) {
+    const result = await pool.query<InventorySnapshot>(
       `SELECT remaining, capacity, (SELECT count(*)::int FROM lastresort.reservations WHERE event_id = $1) AS confirmed
          FROM lastresort.events WHERE id = $1`, [eventId],
     );
+    if (evidence) evidence.finalState = result.rows[0] ?? null;
     expect(result.rows[0]).toMatchObject({ remaining, confirmed });
     expect(result.rows[0].remaining + result.rows[0].confirmed).toBe(result.rows[0].capacity);
   }
@@ -293,26 +295,49 @@ describe("PostgreSQL 17 atomic reservations", () => {
   });
 
   it("allows exactly one of two overlapping connections to obtain the last ticket", async () => {
-    const other = await createGuestSession((sql, values) => pool.query(sql, values));
-    const cookies = [cookie, other.setCookie.split(";")[0]];
-    const owners = [ownerId, other.session.ownerId];
-    const blocker = await pool.connect();
-    const clients = await Promise.all([pool.connect(), pool.connect()]);
-    const pending: ReturnType<typeof reserveTicket>[] = [];
+    const evidence = createCaseEvidence("last-ticket");
+    const clients: PoolClient[] = [];
+    let blocker: PoolClient | undefined;
+    let settled: Promise<PromiseSettledResult<Awaited<ReturnType<typeof reserveTicket>>>[]> | undefined;
+    let verified = false;
     try {
+      const other = await createGuestSession((sql, values) => pool.query(sql, values));
+      const cookies = [cookie, other.setCookie.split(";")[0]];
+      const owners = [ownerId, other.session.ownerId];
+      blocker = await pool.connect();
+      const connections = await Promise.allSettled([pool.connect(), pool.connect()]);
+      for (const connection of connections) {
+        if (connection.status === "fulfilled") clients.push(connection.value);
+      }
+      const failed = connections.find((connection) => connection.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
       await blocker.query("BEGIN");
       await blocker.query("SELECT id FROM lastresort.events WHERE id = $1 FOR UPDATE", [eventId]);
       const contenderPids = await Promise.all(clients.map(async (client) =>
-        (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid,
+        (await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid,
       ));
       expect(new Set(contenderPids).size).toBe(2);
-      pending.push(...clients.map((client, index) => reserveTicket(client, cookies[index], eventId, randomUUID())));
+      settled = Promise.allSettled(clients.map((client, index) => reserveTicket(client, cookies[index], eventId, randomUUID())));
+      evidence.phase = "contending";
       await waitUntil(async () => {
         const waits = await pool.query("SELECT count(*)::int AS count FROM pg_stat_activity WHERE pid = ANY($1::int[]) AND wait_event_type = 'Lock'", [contenderPids]);
+        evidence.observedContenders = waits.rows[0].count;
         return waits.rows[0].count === 2;
       });
       await blocker.query("COMMIT");
-      const results = await Promise.all(pending);
+      evidence.phase = "booking";
+      const outcomes = await settled;
+      evidence.failedWorkers = outcomes.filter((result) => result.status === "rejected").length;
+      const results = outcomes.map((result) => {
+        if (result.status === "rejected") throw result.reason;
+        return result.value;
+      });
+      evidence.outcomes = {
+        confirmed: results.filter((result) => "reservation" in result).length,
+        soldOut: results.filter((result) => "code" in result && result.code === "SOLD_OUT").length,
+        other: results.filter((result) => "code" in result && result.code !== "SOLD_OUT").length,
+      };
+      evidence.phase = "verification";
       expect(results.filter((result) => "reservation" in result)).toHaveLength(1);
       expect(results.filter((result) => "code" in result)).toEqual([{ code: "SOLD_OUT" }]);
       const winner = results.findIndex((result) => "reservation" in result);
@@ -321,34 +346,48 @@ describe("PostgreSQL 17 atomic reservations", () => {
       const stored = await pool.query(
         "SELECT reference, guest_session_id FROM lastresort.reservations WHERE event_id = $1", [eventId],
       );
+      evidence.storedReservations = stored.rows.length;
       expect(stored.rows).toEqual([{ reference: winningResult.reservation.reference, guest_session_id: owners[winner] }]);
-      await expectInventory(0, 1);
+      evidence.ownershipVerified = true;
+      await expectInventory(0, 1, evidence);
+      verified = true;
     } finally {
-      await blocker.query("ROLLBACK");
-      await Promise.allSettled(pending);
-      clients.forEach((client) => client.release());
-      blocker.release();
+      try {
+        try {
+          try { if (blocker) await blocker.query("ROLLBACK"); }
+          finally { if (settled) await settled; }
+        } finally {
+          clients.forEach((client) => client.release());
+          blocker?.release();
+        }
+        evidence.cleanupCompleted = true;
+      } finally {
+        if (verified && evidence.cleanupCompleted) { evidence.status = "passed"; evidence.phase = "complete"; }
+        await saveCaseEvidence(evidence);
+      }
     }
   });
 
   it("keeps capacity 100 consistent across 200 distinct operations on 20 connections (S2-01)", async () => {
     const operationCount = 200;
     const concurrency = 20;
-    await pool.query("UPDATE lastresort.events SET capacity = 100, remaining = 100 WHERE id = $1", [eventId]);
-    const guests = await Promise.all(Array.from({ length: operationCount }, () =>
-      createGuestSession((sql, values) => pool.query(sql, values)),
-    ));
-    expect(new Set(guests.map((guest) => guest.session.ownerId)).size).toBe(operationCount);
-
+    const evidence = createCaseEvidence("capacity-100");
     // Separate worker connections and an independent observer; no application mutex or mocked SQL.
     const workers = new Pool({ connectionString: databaseUrl, max: concurrency, connectionTimeoutMillis: 5000 });
-    const blocker = await pool.connect();
+    let blocker: PoolClient | undefined;
     type OperationResult = { ownerId: string; result: Awaited<ReturnType<typeof reserveTicket>> };
     const clients: PoolClient[] = [];
     const pending: Promise<OperationResult[]>[] = [];
     let settled: Promise<PromiseSettledResult<OperationResult[]>[]> | undefined;
     let observations = 0;
+    let verified = false;
     try {
+      await pool.query("UPDATE lastresort.events SET capacity = 100, remaining = 100 WHERE id = $1", [eventId]);
+      const guests = await Promise.all(Array.from({ length: operationCount }, () =>
+        createGuestSession((sql, values) => pool.query(sql, values)),
+      ));
+      expect(new Set(guests.map((guest) => guest.session.ownerId)).size).toBe(operationCount);
+      blocker = await pool.connect();
       const connections = await Promise.allSettled(Array.from({ length: concurrency }, () => workers.connect()));
       for (const connection of connections) {
         if (connection.status === "fulfilled") clients.push(connection.value);
@@ -369,13 +408,17 @@ describe("PostgreSQL 17 atomic reservations", () => {
           const guest = guests[operation];
           const result = await reserveTicket(client, guest.setCookie.split(";")[0], eventId, randomUUID());
           results.push({ ownerId: guest.session.ownerId, result });
+          if ("reservation" in result) evidence.outcomes.confirmed += 1;
+          else if (result.code === "SOLD_OUT") evidence.outcomes.soldOut += 1;
+          else evidence.outcomes.other += 1;
           // Both quantities come from one committed MVCC snapshot, even while other workers write.
-          const snapshot = await pool.query<{ remaining: number; capacity: number; confirmed: number }>(
+          const snapshot = await pool.query<InventorySnapshot>(
             `SELECT remaining, capacity,
                     (SELECT count(*)::int FROM lastresort.reservations WHERE event_id = $1) AS confirmed
                FROM lastresort.events WHERE id = $1`, [eventId],
           );
           const state = snapshot.rows[0];
+          evidence.observations.push({ operation, ...state });
           expect(state.remaining).toBeGreaterThanOrEqual(0);
           expect(state.remaining).toBeLessThanOrEqual(state.capacity);
           expect(state.confirmed).toBeLessThanOrEqual(state.capacity);
@@ -386,19 +429,24 @@ describe("PostgreSQL 17 atomic reservations", () => {
       }));
       // Attach rejection handlers before checking the gate so failures cannot become unhandled rejections.
       settled = Promise.allSettled(pending);
+      evidence.phase = "contending";
       await waitUntil(async () => {
         const waits = await pool.query<{ count: number }>(
           "SELECT count(*)::int AS count FROM pg_stat_activity WHERE pid = ANY($1::int[]) AND wait_event_type = 'Lock'", [pids],
         );
+        evidence.observedContenders = waits.rows[0].count;
         return waits.rows[0].count === concurrency;
       });
       await blocker.query("COMMIT");
+      evidence.phase = "booking";
 
       const outcomes = await settled;
+      evidence.failedWorkers = outcomes.filter((result) => result.status === "rejected").length;
       const results = outcomes.flatMap((outcome) => {
         if (outcome.status === "rejected") throw outcome.reason;
         return outcome.value;
       });
+      evidence.phase = "verification";
       expect(results).toHaveLength(operationCount);
       expect(observations).toBe(operationCount);
       const confirmed = results.flatMap(({ ownerId: guestOwner, result }) =>
@@ -411,17 +459,29 @@ describe("PostgreSQL 17 atomic reservations", () => {
       const stored = await pool.query<{ reference: string; guest_session_id: string; quantity: number; status: string }>(
         "SELECT reference, guest_session_id, quantity, status FROM lastresort.reservations WHERE event_id = $1 ORDER BY reference", [eventId],
       );
+      evidence.storedReservations = stored.rows.length;
       expect(stored.rows).toEqual(confirmed.map((reservation) => ({
         reference: reservation.reference, guest_session_id: reservation.ownerId, quantity: 1, status: "confirmed",
       })).sort((first, second) => first.reference.localeCompare(second.reference)));
-      await expectInventory(0, 100);
+      evidence.ownershipVerified = true;
+      await expectInventory(0, 100, evidence);
+      verified = true;
     } finally {
-      // Release the gate before draining workers, including when a contention assertion fails.
-      await blocker.query("ROLLBACK");
-      if (settled) await settled;
-      clients.forEach((client) => client.release());
-      blocker.release();
-      await workers.end();
+      try {
+        try {
+          // Release the gate before draining workers, including when a contention assertion fails.
+          try { if (blocker) await blocker.query("ROLLBACK"); }
+          finally { if (settled) await settled; }
+        } finally {
+          clients.forEach((client) => client.release());
+          blocker?.release();
+          await workers.end();
+        }
+        evidence.cleanupCompleted = true;
+      } finally {
+        if (verified && evidence.cleanupCompleted) { evidence.status = "passed"; evidence.phase = "complete"; }
+        await saveCaseEvidence(evidence);
+      }
     }
   }, 60_000);
 
