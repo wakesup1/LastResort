@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { Pool } from "pg";
+import { BOOKING_STORAGE_KEY, createBookingController, isReservation } from "../src/app/_lib/booking.ts";
 import { assertDisposableDatabase, readConfig } from "../src/server/config.ts";
 import { writeJson } from "./concurrency-evidence.ts";
 
@@ -54,7 +55,7 @@ async function main() {
     task: "S2-08", revision: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
     workingTreeDirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim().length > 0,
     environment: { node: process.version, platform: process.platform, architecture: process.arch, postgres: null as string | null },
-    workload: { scenarios: 2, capacityPerEvent: 1, transport: "local production HTTP", restart: "application SIGKILL; database stays running" },
+    workload: { scenarios: 3, capacityPerEvent: 1, transport: "local production HTTP", restart: "application SIGKILL; database stays running" },
     startedAt: new Date().toISOString(), finishedAt: null as string | null,
     status: "running" as "running" | "passed" | "failed", phase: "preflight", cases: [] as Case[],
     serverStarts: 0, cleanupCompleted: false,
@@ -260,6 +261,79 @@ async function main() {
       await snapshot(evidence, eventId, 0, 1, 1);
     });
 
+    await scenario("lost-response-and-restart", async (evidence) => {
+      const eventId = await fixture();
+      const values = new Map<string, string>();
+      const storage = {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => { values.set(key, value); },
+        removeItem: (key: string) => { values.delete(key); },
+      };
+      const calls: string[] = [];
+      let original: unknown;
+      const send: typeof fetch = async (url, options) => {
+        const path = String(url);
+        calls.push(`${options?.method ?? "GET"} ${path}`);
+        const headers = new Headers(options?.headers);
+        headers.set("Origin", origin);
+        headers.set("Cookie", cookie);
+        const response = await fetch(`${origin}${path}`, { ...options, headers });
+        if (path === "/api/reservations" && options?.method === "POST") {
+          assert.equal(response.status, 201);
+          original = await response.json(); // Deliberately discard a committed response at the client boundary.
+          throw new TypeError("Injected response loss after commit.");
+        }
+        return response;
+      };
+      assert.deepEqual(await createBookingController(storage, send).confirm(eventId), { kind: "unknown" });
+      assert.ok(isReservation(original));
+      const booking = original;
+      const saved = storage.getItem(BOOKING_STORAGE_KEY);
+      assert.ok(saved);
+      const operation: unknown = JSON.parse(saved);
+      assert.ok(typeof operation === "object" && operation !== null && "operationId" in operation && typeof operation.operationId === "string");
+      const key = operation.operationId;
+      const rejectedKey = randomUUID();
+      await error(await request("/api/reservations", cookie, rejectedKey, eventId), 409, "SOLD_OUT");
+      await snapshot(evidence, eventId, 0, 1, 2);
+      evidence.phase = "committed-application-killed";
+      await writeJson(reportPath, report);
+      await stop(server, "SIGKILL");
+      const reloaded = createBookingController(storage, send);
+      assert.deepEqual(reloaded.restore(), { kind: "unknown" });
+      assert.deepEqual(calls, ["POST /api/session", "POST /api/reservations"]);
+      assert.equal((await reloaded.check()).kind, "unknown");
+      assert.equal(storage.getItem(BOOKING_STORAGE_KEY), saved);
+      await database.query("UPDATE lastresort.events SET sale_closes_at=clock_timestamp()-interval '1 second' WHERE id=$1", [eventId]);
+      evidence.phase = "restart-and-read-original";
+      await start();
+      assert.deepEqual(await reloaded.check(), { kind: "confirmed", reference: booking.reference });
+      assert.deepEqual(calls, ["POST /api/session", "POST /api/reservations", `GET /api/booking-operations/${key}`, `GET /api/booking-operations/${key}`]);
+      const recovered = await request(`/api/booking-operations/${key}`, cookie);
+      assert.equal(recovered.status, 200);
+      assert.deepEqual(await recovered.json(), { eventId, outcome: { reservation: booking } });
+      const replay = await request("/api/reservations", cookie, key, eventId);
+      assert.equal(replay.status, 200);
+      assert.deepEqual(await replay.json(), booking);
+      // Persisted rejection must survive restart and replay SOLD_OUT even after sales close.
+      const rejection = await request(`/api/booking-operations/${rejectedKey}`, cookie);
+      assert.equal(rejection.status, 200);
+      assert.deepEqual(await rejection.json(), { eventId, outcome: { code: "SOLD_OUT" } });
+      await error(await request("/api/reservations", cookie, rejectedKey, eventId), 409, "SOLD_OUT");
+      const detail = await request(`/api/reservations/${booking.reference}`, cookie);
+      assert.equal(detail.status, 200);
+      assert.deepEqual(await detail.json(), booking);
+      const history = await request("/api/reservations", cookie);
+      assert.equal(history.status, 200);
+      const body: unknown = await history.json();
+      assert.ok(typeof body === "object" && body !== null && "reservations" in body && Array.isArray(body.reservations));
+      assert.equal(body.reservations.filter((item: unknown) => isReservation(item) && item.reference === booking.reference).length, 1);
+      for (const path of [`/api/booking-operations/${key}`, `/api/reservations/${booking.reference}`]) {
+        await error(await request(path, otherCookie), 404, "NOT_FOUND");
+        await error(await request(path, ""), 401, "SESSION_REQUIRED");
+      }
+      await snapshot(evidence, eventId, 0, 1, 2);
+    });
     report.status = "passed";
     report.phase = "complete";
   } catch {
