@@ -61,3 +61,12 @@ jobs:
           retention-days: 14
       - run: npm run build
       - run: npm run test:http
+      - run: npm run test:failure
+      - name: Retain failure recovery evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: failure-recovery-evidence-${{ github.run_attempt }}
+          path: test-results/failure-recovery/
+          if-no-files-found: ignore
+          retention-days: 14
