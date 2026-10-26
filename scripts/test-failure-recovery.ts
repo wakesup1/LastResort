@@ -54,7 +54,7 @@ async function main() {
     task: "S2-08", revision: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
     workingTreeDirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim().length > 0,
     environment: { node: process.version, platform: process.platform, architecture: process.arch, postgres: null as string | null },
-    workload: { scenarios: 1, capacityPerEvent: 1, transport: "local production HTTP", restart: "application SIGKILL; database stays running" },
+    workload: { scenarios: 2, capacityPerEvent: 1, transport: "local production HTTP", restart: "application SIGKILL; database stays running" },
     startedAt: new Date().toISOString(), finishedAt: null as string | null,
     status: "running" as "running" | "passed" | "failed", phase: "preflight", cases: [] as Case[],
     serverStarts: 0, cleanupCompleted: false,
@@ -200,6 +200,61 @@ async function main() {
       await database.query(`DROP FUNCTION lastresort.${fixtureName}()`);
       await database.query(`DROP SEQUENCE lastresort.${fixtureName}`);
       evidence.phase = "same-key-retry";
+      assert.equal((await request("/api/reservations", cookie, key, eventId)).status, 201);
+      assert.equal((await request("/api/reservations", cookie, key, eventId)).status, 200);
+      await snapshot(evidence, eventId, 0, 1, 1);
+    });
+
+    await scenario("crash-before-commit", async (evidence) => {
+      const eventId = await fixture();
+      const key = randomUUID();
+      const gate = await database.connect();
+      let pending: Promise<Response | null> | undefined;
+      try {
+        const gatePid = (await gate.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+        await gate.query("BEGIN");
+        await gate.query("SELECT pg_advisory_xact_lock($1)", [gatePid]);
+        await database.query(`CREATE FUNCTION lastresort.${fixtureName}() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM lastresort.events WHERE id=NEW.event_id AND remaining=0)
+               OR NOT EXISTS (SELECT 1 FROM lastresort.reservations WHERE event_id=NEW.event_id)
+            THEN RAISE EXCEPTION 'Failure fixture was reached too early'; END IF;
+            PERFORM pg_advisory_xact_lock(TG_ARGV[0]::bigint);
+            RETURN NEW;
+          END $$`);
+        await database.query(`CREATE TRIGGER ${fixtureName} BEFORE UPDATE ON lastresort.booking_operations
+          FOR EACH ROW WHEN (NEW.event_id='${eventId}') EXECUTE FUNCTION lastresort.${fixtureName}('${gatePid}')`);
+        evidence.phase = "waiting-after-writes";
+        pending = request("/api/reservations", cookie, key, eventId).catch(() => null);
+        let backendPid = 0;
+        await until(async () => {
+          const waiters = await database.query<{ pid: number }>(
+            "SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND application_name='lastresort' AND $1::int=ANY(pg_blocking_pids(pid))", [gatePid],
+          );
+          backendPid = waiters.rows[0]?.pid ?? 0;
+          return backendPid !== 0;
+        }, 3000);
+        await snapshot(evidence, eventId, 1, 0, 0);
+        await error(await request(`/api/booking-operations/${key}`, cookie), 404, "NOT_FOUND");
+        evidence.phase = "application-killed";
+        await writeJson(reportPath, report);
+        await stop(server, "SIGKILL");
+        // Release the test gate only after killing the application. PostgreSQL then
+        // detects the closed client socket and aborts the transaction on that backend.
+        await gate.query("ROLLBACK");
+        await until(async () => (await database.query("SELECT 1 FROM pg_stat_activity WHERE pid=$1", [backendPid])).rows.length === 0);
+        const response = await pending;
+        assert.equal(response, null, "A killed application must not deliver a confirmation.");
+      } finally {
+        try { await gate.query("ROLLBACK"); }
+        finally { gate.release(); if (pending) await pending; }
+      }
+      await database.query(`DROP TRIGGER ${fixtureName} ON lastresort.booking_operations`);
+      await database.query(`DROP FUNCTION lastresort.${fixtureName}()`);
+      await snapshot(evidence, eventId, 1, 0, 0);
+      evidence.phase = "restarted";
+      await start();
+      await error(await request(`/api/booking-operations/${key}`, cookie), 404, "NOT_FOUND");
       assert.equal((await request("/api/reservations", cookie, key, eventId)).status, 201);
       assert.equal((await request("/api/reservations", cookie, key, eventId)).status, 200);
       await snapshot(evidence, eventId, 0, 1, 1);
