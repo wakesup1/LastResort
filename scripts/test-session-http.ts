@@ -7,6 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Pool } from "pg";
 import { assertDisposableDatabase, readConfig } from "../src/server/config.ts";
 import { BOOKING_STORAGE_KEY, createBookingController } from "../src/app/_lib/booking.ts";
+import { verifyIdempotencyHttp } from "./verify-idempotency-http.ts";
 
 type HttpResult = { status: number; headers: IncomingHttpHeaders; body: string };
 
@@ -342,6 +343,7 @@ try {
   assert.deepEqual(await (await history("", otherCookie)).json(), { reservations: [], nextCursor: null });
   assert.equal((await pool.query("SELECT count(*)::int AS count FROM lastresort.reservations WHERE event_id=$1", [bookingEventId])).rows[0].count, 23);
   assert.equal((await pool.query("SELECT remaining FROM lastresort.events WHERE id=$1", [bookingEventId])).rows[0].remaining, 0);
+  await verifyIdempotencyHttp(origin, pool, cookie.split(";")[0], otherCookie);
   process.stdout.write("Production-server session, idempotent-booking, response-loss recovery, owned-result, history and structured-diagnostic HTTP checks passed.\n");
 } finally {
   if (createdBookingFixture) {

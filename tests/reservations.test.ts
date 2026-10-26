@@ -82,6 +82,30 @@ describe("reservation HTTP boundary and transaction", () => {
     expect(query).toHaveBeenLastCalledWith("ROLLBACK");
   });
 
+  it("normalizes JSON whitespace/property order and UUID case before claiming the operation (S2-04)", async () => {
+    const input = new Request("https://example.test/api/reservations", {
+      method: "POST",
+      headers: { Origin: "https://example.test", "Content-Type": "application/json; charset=utf-8", "Idempotency-Key": reference.toUpperCase(), Cookie: `lastresort_guest=${"A".repeat(43)}` },
+      body: ` { "quantity" : 1, "eventId" : "${event.id}" } `,
+    });
+    await expectResponse(await POST(input), 201);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO lastresort.booking_operations"), [ownerId, reference, event.id]);
+  });
+
+  it.each([
+    ["NOT_FOUND", 404], ["SALES_NOT_OPEN", 409], ["SALES_CLOSED", 409], ["SOLD_OUT", 409],
+  ])("replays terminal %s with its contract status and no inventory update (S2-04)", async (code, status) => {
+    const implementation = query.getMockImplementation();
+    query.mockImplementation(async (sql: string, ...args: unknown[]) => {
+      if (sql.includes("SELECT event_id, response")) return { rows: [{ event_id: event.id, response: { code } }] };
+      return implementation?.(sql, ...args);
+    });
+    expect(await expectResponse(await POST(request()), status)).toMatchObject({ error: { code } });
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("lastresort.events"))).toBe(false);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO lastresort.reservations"))).toBe(false);
+    expect(query).toHaveBeenLastCalledWith("COMMIT");
+  });
+
   it.each(["", "null", "https://attacker.test"])("rejects Origin %s without database access", async (Origin) => {
     await expectResponse(await POST(request(undefined, { Origin })), 403);
     expect(connect).not.toHaveBeenCalled();
@@ -90,6 +114,9 @@ describe("reservation HTTP boundary and transaction", () => {
   it.each([
     null, [], {}, { eventId: event.id }, { eventId: event.id, quantity: 2 },
     { eventId: event.id, quantity: "1" }, { eventId: "bad--id", quantity: 1 },
+    { eventId: event.id, quantity: 0 }, { eventId: event.id, quantity: -1 },
+    { eventId: event.id, quantity: 1.5 }, { eventId: event.id, quantity: null },
+    { eventId: event.id, quantity: true },
     { eventId: "x".repeat(101), quantity: 1 }, { eventId: event.id, quantity: 1, ownerId },
     { eventId: event.id, quantity: 1, sessionToken: "forged" },
   ])("rejects invalid input %j before database access", async (body) => {

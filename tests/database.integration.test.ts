@@ -563,7 +563,125 @@ describe("PostgreSQL 17 atomic reservations", () => {
     }
   }, 15_000);
 
-  it.each(["SALES_NOT_OPEN", "SALES_CLOSED", "SOLD_OUT", "NOT_FOUND"])("retains terminal %s even after availability changes (S2-03)", async (code) => {
+  async function overlappingBookings(inputs: { cookie: string; eventId: string; key: string }[], lockedEvents: string[]) {
+    const workers = new Pool({ connectionString: databaseUrl, max: inputs.length, connectionTimeoutMillis: 5000, statement_timeout: 10000 });
+    const clients: PoolClient[] = [];
+    let blocker: PoolClient | undefined;
+    let settled: Promise<PromiseSettledResult<Awaited<ReturnType<typeof reserveTicket>>>[]> | undefined;
+    try {
+      blocker = await pool.connect();
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM lastresort.events WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE", [lockedEvents]);
+      const connections = await Promise.allSettled(inputs.map(() => workers.connect()));
+      for (const connection of connections) if (connection.status === "fulfilled") clients.push(connection.value);
+      const failed = connections.find((connection) => connection.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
+      const pids = await Promise.all(clients.map(async (client) => (await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid));
+      expect(new Set(pids).size).toBe(inputs.length);
+      settled = Promise.allSettled(clients.map((client, index) => {
+        const input = inputs[index];
+        return reserveTicket(client, input.cookie, input.eventId, input.key);
+      }));
+      await waitUntil(async () => (await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM pg_stat_activity WHERE pid = ANY($1::int[]) AND wait_event_type = 'Lock'", [pids],
+      )).rows[0].count === inputs.length);
+      await blocker.query("COMMIT");
+      return (await settled).map((outcome) => {
+        if (outcome.status === "rejected") throw outcome.reason;
+        return outcome.value;
+      });
+    } finally {
+      try {
+        try { if (blocker) await blocker.query("ROLLBACK"); }
+        finally { if (settled) await settled; }
+      } finally {
+        clients.forEach((client) => client.release());
+        blocker?.release();
+        await workers.end();
+      }
+    }
+  }
+
+  async function createAlternateEvent() {
+    const alternateId = `alternate-${randomUUID()}`;
+    await pool.query(
+      `INSERT INTO lastresort.events SELECT $1, name, starts_at, venue, ticket_type, price_minor,
+       sale_opens_at, sale_closes_at, capacity, remaining FROM lastresort.events WHERE id = $2`, [alternateId, eventId],
+    );
+    return alternateId;
+  }
+
+  it("keeps ten overlapping duplicates and five later replays on one ticket while inventory remains (S2-04)", async () => {
+    await pool.query("UPDATE lastresort.events SET capacity=10, remaining=10 WHERE id=$1", [eventId]);
+    const key = randomUUID();
+    const results = await overlappingBookings(Array.from({ length: 10 }, (_, index) => ({ cookie, eventId, key: index % 2 ? key.toUpperCase() : key })), [eventId]);
+    const original = results.find((result) => result.replayed !== true);
+    if (!original || !("reservation" in original)) throw new Error("Expected one original confirmation.");
+    expect(results.filter((result) => !result.replayed)).toHaveLength(1);
+    expect(results.filter((result) => result.replayed)).toHaveLength(9);
+    for (const result of results) expect(result).toEqual(result.replayed ? { ...original, replayed: true } : original);
+    for (let attempt = 0; attempt < 5; attempt += 1) expect(await book(cookie, eventId, key)).toEqual({ ...original, replayed: true });
+    await expectInventory(9, 1);
+    const operations = await pool.query("SELECT event_id, quantity, response FROM lastresort.booking_operations WHERE guest_session_id=$1", [ownerId]);
+    expect(operations.rows).toEqual([{ event_id: eventId, quantity: 1, response: original }]);
+    const next = await book();
+    if (!("reservation" in next)) throw new Error("Expected a deliberate new operation to confirm.");
+    expect(next.reservation.reference).not.toBe(original.reservation.reference);
+    await expectInventory(8, 2);
+  }, 30_000);
+
+  it("arbitrates different valid payloads on one owner/key without changing the winning booking (S2-04)", async () => {
+    await pool.query("UPDATE lastresort.events SET capacity=3, remaining=3 WHERE id=$1", [eventId]);
+    const alternateId = await createAlternateEvent();
+    const targets = [eventId, alternateId];
+    const key = randomUUID();
+    const results = await overlappingBookings(targets.map((target) => ({ cookie, eventId: target, key })), targets);
+    const winner = results.findIndex((result) => "reservation" in result);
+    const original = results[winner];
+    if (!original || !("reservation" in original)) throw new Error("Expected one payload to win.");
+    expect(results.filter((result) => "reservation" in result)).toHaveLength(1);
+    expect(results[1 - winner]).toEqual({ code: "OPERATION_CONFLICT" });
+    expect(original.reservation.event.eventId).toBe(targets[winner]);
+    const stored = await pool.query("SELECT event_id, quantity, response FROM lastresort.booking_operations WHERE guest_session_id=$1", [ownerId]);
+    expect(stored.rows).toEqual([{ event_id: targets[winner], quantity: 1, response: original }]);
+    expect(await book(cookie, targets[1 - winner], key)).toEqual({ code: "OPERATION_CONFLICT" });
+    expect(await book(cookie, targets[winner], key)).toEqual({ ...original, replayed: true });
+    expect((await pool.query("SELECT event_id, quantity, response FROM lastresort.booking_operations WHERE guest_session_id=$1", [ownerId])).rows).toEqual(stored.rows);
+    const inventory = await pool.query<{ id: string; capacity: number; remaining: number; confirmed: number }>(
+      `SELECT id, capacity, remaining, (SELECT count(*)::int FROM lastresort.reservations WHERE event_id=event.id) AS confirmed
+       FROM lastresort.events AS event WHERE id=ANY($1::text[])`, [targets],
+    );
+    expect(inventory.rows).toHaveLength(2);
+    for (const row of inventory.rows) expect(row).toMatchObject({ capacity: 3, remaining: row.id === targets[winner] ? 2 : 3, confirmed: row.id === targets[winner] ? 1 : 0 });
+  }, 30_000);
+
+  it("allows the same key with different payloads for two overlapping owners without disclosure (S2-04)", async () => {
+    const alternateId = await createAlternateEvent();
+    const other = await createGuestSession((sql, values) => pool.query(sql, values));
+    const otherCookie = other.setCookie.split(";")[0];
+    const key = randomUUID();
+    const results = await overlappingBookings([{ cookie, eventId, key }, { cookie: otherCookie, eventId: alternateId, key }], [eventId, alternateId]);
+    const [first, second] = results;
+    if (!("reservation" in first) || !("reservation" in second)) throw new Error("Expected independent owner-scoped confirmations.");
+    expect(first.replayed).not.toBe(true);
+    expect(second.replayed).not.toBe(true);
+    expect(first.reservation.reference).not.toBe(second.reservation.reference);
+    expect(await readReservation(pool, otherCookie, first.reservation.reference)).toEqual({ code: "NOT_FOUND" });
+    expect(await readReservation(pool, cookie, second.reservation.reference)).toEqual({ code: "NOT_FOUND" });
+    expect(await readBookingOperation(pool, cookie, key)).toEqual({ eventId, outcome: first });
+    expect(await readBookingOperation(pool, otherCookie, key)).toEqual({ eventId: alternateId, outcome: second });
+    const stored = await pool.query<{ guest_session_id: string; event_id: string; response: unknown }>(
+      "SELECT guest_session_id, event_id, response FROM lastresort.booking_operations WHERE operation_key=$1", [key],
+    );
+    expect(stored.rows).toHaveLength(2);
+    expect(stored.rows.find((row) => row.guest_session_id === ownerId)).toMatchObject({ event_id: eventId, response: first });
+    expect(stored.rows.find((row) => row.guest_session_id === other.session.ownerId)).toMatchObject({ event_id: alternateId, response: second });
+    await expectInventory(0, 1);
+    expect((await pool.query("SELECT remaining FROM lastresort.events WHERE id=$1", [alternateId])).rows[0].remaining).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS count FROM lastresort.reservations WHERE event_id=$1", [alternateId])).rows[0].count).toBe(1);
+  }, 30_000);
+
+  it.each(["SALES_NOT_OPEN", "SALES_CLOSED", "SOLD_OUT", "NOT_FOUND"])("retains terminal %s even after availability changes and payload conflict (S2-03, S2-04)", async (code) => {
     const key = randomUUID();
     let target = eventId;
     if (code === "SALES_NOT_OPEN") await pool.query("UPDATE lastresort.events SET sale_opens_at = clock_timestamp() + interval '1 hour' WHERE id = $1", [eventId]);
@@ -571,6 +689,8 @@ describe("PostgreSQL 17 atomic reservations", () => {
     if (code === "SOLD_OUT") expect(await book()).toHaveProperty("reservation");
     if (code === "NOT_FOUND") target = `missing-${randomUUID()}`;
     expect(await book(cookie, target, key)).toEqual({ code });
+    expect(await book(cookie, "different-event", key)).toEqual({ code: "OPERATION_CONFLICT" });
+    expect((await pool.query("SELECT event_id, response FROM lastresort.booking_operations WHERE guest_session_id=$1 AND operation_key=$2", [ownerId, key])).rows).toEqual([{ event_id: target, response: { code } }]);
     if (code === "NOT_FOUND") {
       await pool.query(
         `INSERT INTO lastresort.events SELECT $1, name, starts_at, venue, ticket_type, price_minor,
