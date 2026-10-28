@@ -30,6 +30,7 @@
 body { margin: 0; min-width: 320px; font-size: 1rem; line-height: 1.5625; }
 h1, h2, p, dl, dd { margin: 0; }
 h1, h2 { overflow-wrap: anywhere; }
+h1 { scroll-margin-top: 24px; }
 h2 { font-size: 1.5rem; line-height: 1.25; font-weight: 500; letter-spacing: -.03em; }
 button, a { -webkit-tap-highlight-color: transparent; }
 button { font: inherit; }
@@ -55,6 +56,9 @@ button:focus-visible, a:focus-visible, main:focus-visible { outline: 3px solid v
 .page-tagline, .page-title { font-size: 2.25rem; line-height: 1.17; font-weight: 500; letter-spacing: -.05em; }
 .intro-aside { text-align: right; color: var(--lr-muted); font-size: .875rem; }
 .supporting-text { font-size: .875rem; line-height: 1.5; color: var(--lr-muted); }
+.booking-progress { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; padding: 0; list-style: none; font-size: .75rem; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--lr-muted); }
+.booking-progress li + li::before { content: "/"; margin-right: 8px; color: var(--lr-muted); }
+.booking-progress [aria-current="step"] { color: var(--lr-brand); }
 
 .ticket { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); border: 1px solid var(--lr-line); border-radius: 8px; background: var(--lr-paper); }
 .ticket-body { padding: 32px; min-width: 0; }
