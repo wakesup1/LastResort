@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { POST } from "../src/app/api/session/route.ts";
 import {
   createGuestSession,
@@ -115,6 +115,7 @@ describe("HTTP request checks", () => {
 
 describe("POST /api/session", () => {
   beforeEach(() => { query.mockReset(); });
+  afterEach(() => { vi.unstubAllEnvs(); });
 
   it("creates a session for a same-origin HTTPS request without returning JSON", async () => {
     query.mockResolvedValue({ rows: [{ id: OWNER_ID }] });
@@ -141,9 +142,40 @@ describe("POST /api/session", () => {
     expect(query.mock.calls[0]?.[0]).toContain("token_hash = $1");
   });
 
+  it("uses the configured HTTPS origin for a secure host-only cookie behind a proxy (S3-03)", async () => {
+    vi.stubEnv("APP_ORIGIN", "https://tickets.example");
+    query.mockResolvedValue({ rows: [{ id: OWNER_ID }] });
+    const response = await POST(new Request("http://internal:3000/api/session", {
+      method: "POST", headers: { Host: "internal:3000", Origin: "https://tickets.example", "X-Forwarded-Host": "attacker.test", "X-Forwarded-Proto": "http" },
+    }));
+    expect(response.status).toBe(204);
+    expect(response.headers.get("set-cookie")).toMatch(/; Path=\/; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure$/);
+    expect(response.headers.get("set-cookie")).not.toMatch(/Domain=/i);
+    expect(response.headers.has("access-control-allow-origin")).toBe(false);
+    expect(await response.text()).toBe("");
+  });
+
+  it("rejects an attacker origin despite matching forged proxy and Host headers (S3-03)", async () => {
+    vi.stubEnv("APP_ORIGIN", "https://tickets.example");
+    const response = await POST(new Request("http://internal:3000/api/session", {
+      method: "POST", headers: { Host: "attacker.test", Origin: "https://attacker.test", "X-Forwarded-Host": "attacker.test", "X-Forwarded-Proto": "https" },
+    }));
+    expect(response.status).toBe(403);
+    expect(response.headers.has("set-cookie")).toBe(false);
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it.each([
     { label: "missing Origin", options: {} },
     { label: "cross-origin Origin", options: { origin: "https://attacker.test" } },
+    { label: "opaque Origin", options: { origin: "null" } },
+    { label: "same-site subdomain Origin", options: { origin: "https://sub.example.test" } },
+    { label: "different-port Origin", options: { origin: "https://example.test:444" } },
+    { label: "downgraded Origin", options: { origin: "http://example.test" } },
+    { label: "lookalike Origin", options: { origin: "https://example.test.attacker.test" } },
+    { label: "Origin with credentials", options: { origin: "https://attacker@example.test" } },
+    { label: "Origin with a path", options: { origin: "https://example.test/path" } },
+    { label: "multiple Origins", options: { origin: "https://example.test, https://attacker.test" } },
   ])("rejects $label before database access", async ({ options }) => {
     const response = await POST(sessionRequest(options));
 

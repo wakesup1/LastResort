@@ -1,7 +1,7 @@
 import SwaggerParser from "@apidevtools/swagger-parser";
 import { Ajv, type AnySchemaObject } from "ajv";
 import addFormats from "ajv-formats";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { POST } from "../src/app/api/reservations/route.ts";
 
 const { query, connect, release } = vi.hoisted(() => ({ query: vi.fn(), connect: vi.fn(), release: vi.fn() }));
@@ -49,6 +49,7 @@ beforeEach(() => {
     return { rows: [] };
   });
 });
+afterEach(() => { vi.unstubAllEnvs(); });
 
 describe("reservation HTTP boundary and transaction", () => {
   it("returns the confirmed reference only after commit and keeps ownership out of the response", async () => {
@@ -106,8 +107,20 @@ describe("reservation HTTP boundary and transaction", () => {
     expect(query).toHaveBeenLastCalledWith("COMMIT");
   });
 
-  it.each(["", "null", "https://attacker.test"])("rejects Origin %s without database access", async (Origin) => {
+  it.each([
+    "", "null", "https://attacker.test", "https://sub.example.test", "https://example.test:444",
+    "http://example.test", "https://example.test.attacker.test", "https://attacker@example.test",
+    "https://example.test/path", "https://example.test, https://attacker.test",
+  ])("rejects Origin %s without database access", async (Origin) => {
     await expectResponse(await POST(request(undefined, { Origin })), 403);
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("rejects origin spoofing behind a configured proxy before claiming an operation (S3-03)", async () => {
+    vi.stubEnv("APP_ORIGIN", "https://tickets.example");
+    await expectResponse(await POST(request(undefined, {
+      Origin: "https://attacker.test", Host: "attacker.test", "X-Forwarded-Host": "attacker.test", "X-Forwarded-Proto": "https",
+    }, "http://internal:3000/api/reservations")), 403);
     expect(connect).not.toHaveBeenCalled();
   });
 
