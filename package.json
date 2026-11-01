@@ -19,6 +19,7 @@
     "test:concurrency": "tsx scripts/test-concurrency.ts",
     "test:http": "tsx scripts/test-session-http.ts",
     "test:failure": "tsx scripts/test-failure-recovery.ts",
+    "test:baseline": "tsx scripts/test-baseline.ts",
     "db:migrate": "tsx scripts/database.ts migrate",
     "db:seed": "tsx scripts/database.ts seed",
     "db:reset": "tsx scripts/database.ts reset",
