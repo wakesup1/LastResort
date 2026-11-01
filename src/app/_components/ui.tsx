@@ -23,3 +23,7 @@ export function StatusBadge({ children, tone = "neutral" }: { children: ReactNod
 export function Notice({ title, children, tone = "info" }: { title: string; children: ReactNode; tone?: "info" | "warning" }) {
   return <div className={`notice tone-${tone}`}><Icon name={tone === "warning" ? "warning" : "info"} /><div><p className="notice-title">{title}</p><p>{children}</p></div></div>;
 }
+
+export function GuestAccessNotice() {
+  return <div className="guest-access-note"><Icon name="monitor" /><p>Your booking stays in this browser. Clearing cookies or using another browser removes access.</p></div>;
+}

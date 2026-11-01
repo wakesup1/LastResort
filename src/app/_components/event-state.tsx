@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { EventLoadState } from "../_hooks/use-event-details.ts";
 import { Icon, Notice } from "./ui.tsx";
+import { PageHeading } from "./page-heading.tsx";
 
 export function EventState({ state, onRetry, children }: { state: EventLoadState; onRetry: () => void; children: ReactNode }) {
   return (
@@ -22,12 +23,12 @@ export function EventState({ state, onRetry, children }: { state: EventLoadState
         <section className="page-state" role={state.kind === "error" ? "alert" : "status"}>
           <span className={`state-symbol ${state.kind === "error" ? "tone-danger" : "tone-neutral"}`}><Icon name={state.kind === "error" ? "warning" : "ticket"} /></span>
           <p className="eyebrow">{state.kind === "error" ? "TEMPORARY ISSUE" : "EVENT NOT FOUND"}</p>
-          <h1>{state.kind === "error" ? "We couldn’t load this event." : "This event isn’t available."}</h1>
+          <PageHeading>{state.kind === "error" ? "We couldn’t load this event." : "This event isn’t available."}</PageHeading>
           <p>{state.kind === "error" ? "The event details are unavailable right now. Please try again." : "It may have been removed or the link may be out of date."}</p>
           <button className="button button-primary" type="button" onClick={onRetry}>{state.kind === "error" ? "Try again" : "Check again"}</button>
         </section>
       )}
-      {state.kind === "ready" && state.freshness === "stale" && <div className="refresh-warning"><Notice tone="warning" title="Availability couldn’t be updated.">These are the last loaded details. Refresh availability before continuing.</Notice></div>}
+      {state.kind === "ready" && state.freshness === "stale" && <div className="refresh-warning" role="alert"><Notice tone="warning" title="Availability couldn’t be updated.">These are the last loaded details. Refresh availability before continuing.</Notice></div>}
       {children}
     </>
   );
