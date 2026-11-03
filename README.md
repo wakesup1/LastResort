@@ -110,6 +110,20 @@ For an unknown booking outcome, keep the original browser session and operation 
 
 Application rollback does not undo migrations or restore database contents; investigate database recovery separately using the provider's verified backup and restore procedure. Recheck health and record the restored revision and result. Never reset an active demo to recover an outage. The earlier S2-08 test evidence in this README covers application transaction rollback, response loss and process restart on a disposable database; it does not verify Vercel rollback or a database restore.
 
+## Hosted security verification (S3-05)
+
+On 2026-11-03, Vercel reported production deployment [Ahp87hzme](https://vercel.com/wakesup1s-projects/last-resort/Ahp87hzme4qwuLvPU98gD9gShjEd) Ready for revision `1d2bfd7f9ae483a3580b92479fd4514d130723ab`, with the canonical demo domain assigned. This is the deployment created after the S3-04 documentation merge; the earlier candidate revision above identifies the earlier smoke test, not the current production revision.
+
+Checks against the canonical HTTPS domain passed for health and HTTP-to-HTTPS redirect; a newly created guest cookie had `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, a 30-day max age and no `Domain`. The same session resumed without a replacement cookie. A fresh guest's history was empty; a different owner's existing reference returned the same 404 body as an unknown reference, and no session received 401. Session and reservation mutations rejected a foreign origin; a forged owner field and forwarded-host spoof were rejected. Tested private reads were `no-store`, did not grant cross-origin access, and a cross-origin preflight did not grant access. The Safari owner could refresh its existing history after deployment; a separate in-app browser without that session could not open the owner's result. These are bounded checks, not a complete browser or security audit.
+
+To repeat the HTTP checks, supply the HTTPS origin and a valid reference belonging to a **different** existing guest. The command creates one new guest session in the target database but does not book, reset data or print cookies or references. It compares the foreign reference with a generated unknown reference; using a nonexistent reference in both cases does not prove cross-owner isolation.
+
+```sh
+node scripts/check-deployment-security.mjs https://last-resort-five.vercel.app '<other-owner-reservation-uuid>' --create-guest-session
+```
+
+The Vercel runtime-log view for this deployment showed sanitized health and rejected-origin diagnostic records and PostgreSQL SSL-mode deprecation warnings in the inspected time window; no cookie, token or database URL was visible in those displayed records. This limited review does not prove all provider logs or responses are free of secrets. The warning states that a future `pg` major version will change the semantics of some SSL modes; assess connection settings before upgrading. No application or dependency change was made in S3-05. S3-06 still needs its separate post-deployment correctness and failure checks, and any later production deployment needs security verification against its own revision.
+
 ## Reset test or demo data
 
 This command clears LastResort event data in the selected database and seeds it again in one transaction. Use it only for disposable fixtures:
