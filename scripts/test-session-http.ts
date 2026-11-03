@@ -87,6 +87,7 @@ let server: ChildProcess | undefined;
 let serverOutput = "";
 let createdTokenHash: string | undefined;
 let otherTokenHash: string | undefined;
+let expiredTokenHash: string | undefined;
 const bookingEventId = `http-booking-${randomUUID()}`;
 let createdBookingFixture = false;
 
@@ -131,6 +132,8 @@ try {
     ? accepted.headers["set-cookie"][0]
     : accepted.headers["set-cookie"];
   assert.ok(cookie, "Expected the successful request to set the guest session cookie.");
+  assert.match(cookie, /; Path=\/; HttpOnly; SameSite=Lax; Max-Age=2592000$/);
+  assert.doesNotMatch(cookie, /;\s*(Domain=|Secure(?:;|$))/i, "The loopback HTTP fixture must use a host-only development cookie.");
   const token = cookie.split(";", 1)[0]?.split("=", 2)[1];
   assert.ok(token, "Expected the guest session cookie to contain a token.");
   createdTokenHash = createHash("sha256").update(token, "utf8").digest("hex");
@@ -142,6 +145,15 @@ try {
   const rejectedOrigin = await postSession(port, "http://attacker.test");
   assert.equal(rejectedOrigin.status, 403, `Expected a cross-origin request to be rejected: ${rejectedOrigin.body}`);
   assert.match(rejectedOrigin.body, /ORIGIN_FORBIDDEN/);
+
+  // Origin matching is stricter than SameSite: alternate ports/schemes and opaque
+  // origins must not create sessions, even when a browser could send its cookie.
+  for (const rejected of ["", "null", `${origin}/path`, origin.replace("http:", "https:"), `http://localhost:${port}`]) {
+    const response = await postSession(port, rejected);
+    assert.equal(response.status, 403);
+    assert.equal(response.headers["set-cookie"], undefined);
+    assert.equal(response.headers["cache-control"], "no-store");
+  }
 
   await pool.query(
     `INSERT INTO lastresort.events
@@ -160,6 +172,11 @@ try {
   for (const [headers, extraInput, expectedStatus] of [
     [{ Cookie: "" }, {}, 401],
     [{ Origin: "http://attacker.test" }, {}, 403],
+    [{ Origin: "null" }, {}, 403],
+    [{ Origin: "" }, {}, 403],
+    [{ Origin: `${origin}/path` }, {}, 403],
+    [{ Origin: `http://localhost:${port}` }, {}, 403],
+    [{ Origin: "http://attacker.test", "X-Forwarded-Host": "attacker.test", "X-Forwarded-Proto": "http" }, {}, 403],
     [{ "Idempotency-Key": "invalid" }, {}, 400],
     [{ "Idempotency-Key": "" }, {}, 400],
     [{}, { quantity: 2 }, 400],
@@ -264,6 +281,42 @@ try {
   assert.equal(forbiddenRead.status, 404);
   assert.equal(missingRead.status, 404);
   assert.equal(await forbiddenRead.text(), await missingRead.text());
+
+  // Exercise invalid/duplicate/expired credentials through every private HTTP
+  // endpoint and confirm none silently creates a replacement owner or ticket.
+  const expiredSession = await postSession(port, origin);
+  const expiredCookie = expiredSession.headers["set-cookie"]?.[0]?.split(";")[0];
+  assert.ok(expiredCookie);
+  expiredTokenHash = createHash("sha256").update(expiredCookie.split("=")[1], "utf8").digest("hex");
+  await pool.query("UPDATE lastresort.guest_sessions SET created_at=now()-interval '2 seconds', expires_at=now()-interval '1 second' WHERE token_hash=$1", [expiredTokenHash]);
+  const deniedSnapshotSql = `SELECT remaining,
+    (SELECT count(*)::int FROM lastresort.reservations WHERE event_id=$1) AS reservations,
+    (SELECT count(*)::int FROM lastresort.booking_operations WHERE event_id=$1) AS operations,
+    (SELECT count(*)::int FROM lastresort.guest_sessions) AS sessions
+    FROM lastresort.events WHERE id=$1`;
+  const beforeDenied = await pool.query(deniedSnapshotSql, [bookingEventId]);
+  for (const invalidCookie of ["", "lastresort_guest=forged", `lastresort_guest=${"X".repeat(43)}`, `${cookie.split(";")[0]}; ${cookie.split(";")[0]}`, expiredCookie]) {
+    const responses = [
+      await postBooking({ Cookie: invalidCookie }),
+      ...await Promise.all([resultUrl, operationUrl, `${origin}/api/reservations`].map((url) => fetch(url, { headers: { Cookie: invalidCookie }, signal: AbortSignal.timeout(5000) }))),
+    ];
+    for (const response of responses) {
+      assert.equal(response.status, 401);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(response.headers.has("set-cookie"), false);
+      assert.equal(response.headers.has("access-control-allow-origin"), false);
+      assert.equal((await response.json()).error.code, "SESSION_REQUIRED");
+    }
+  }
+  const afterDenied = await pool.query(deniedSnapshotSql, [bookingEventId]);
+  assert.deepEqual(afterDenied.rows, beforeDenied.rows);
+  for (const url of [resultUrl, operationUrl, `${origin}/api/reservations`]) {
+    const response: Response = await fetch(url, { headers: { Cookie: cookie.split(";")[0], Origin: "https://attacker.test" }, signal: AbortSignal.timeout(5000) });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.has("access-control-allow-origin"), false, "Private reads must not opt into cross-origin disclosure.");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    await response.arrayBuffer();
+  }
   const otherOwnerAttempt = await postBooking({ Cookie: otherCookie, "Idempotency-Key": operationKey });
   assert.equal(otherOwnerAttempt.status, 409);
   assert.equal((await otherOwnerAttempt.json()).error.code, "SOLD_OUT");
@@ -301,9 +354,6 @@ try {
   assert.equal(confirmedLog.operationId, conflictLog.operationId);
   assert.notEqual(confirmedLog.operationId, otherLog.operationId);
   assert.notEqual(booked.headers.get("x-request-id"), replayed.headers.get("x-request-id"));
-  for (const secret of [token, operationKey, databaseUrl, otherCookie.split("=")[1]]) {
-    assert.ok(!JSON.stringify(logs).includes(secret), "Sensitive value appeared in structured HTTP logs.");
-  }
   async function history(suffix = "", ownerCookie = cookie?.split(";")[0] ?? "") {
     const response = await fetch(`${origin}/api/reservations${suffix}`, { headers: { Cookie: ownerCookie } });
     assert.equal(response.headers.get("cache-control"), "no-store");
@@ -344,7 +394,11 @@ try {
   assert.equal((await pool.query("SELECT count(*)::int AS count FROM lastresort.reservations WHERE event_id=$1", [bookingEventId])).rows[0].count, 23);
   assert.equal((await pool.query("SELECT remaining FROM lastresort.events WHERE id=$1", [bookingEventId])).rows[0].remaining, 0);
   await verifyIdempotencyHttp(origin, pool, cookie.split(";")[0], otherCookie);
-  process.stdout.write("Production-server session, idempotent-booking, response-loss recovery, owned-result, history and structured-diagnostic HTTP checks passed.\n");
+  await delay(100);
+  for (const secret of [token, operationKey, databaseUrl, otherCookie.split("=")[1], expiredCookie.split("=")[1]]) {
+    assert.ok(!serverOutput.includes(secret), "Sensitive value appeared in application stdout/stderr.");
+  }
+  process.stdout.write("Production-server session, idempotent-booking, response-loss recovery, owned-result, history, security-boundary and structured-diagnostic HTTP checks passed.\n");
 } finally {
   if (createdBookingFixture) {
     await pool.query("DELETE FROM lastresort.booking_operations WHERE event_id = $1", [bookingEventId]).catch(() => {});
@@ -356,6 +410,9 @@ try {
   }
   if (otherTokenHash) {
     await pool.query("DELETE FROM lastresort.guest_sessions WHERE token_hash = $1", [otherTokenHash]).catch(() => {});
+  }
+  if (expiredTokenHash) {
+    await pool.query("DELETE FROM lastresort.guest_sessions WHERE token_hash = $1", [expiredTokenHash]).catch(() => {});
   }
   if (server) await stopServer(server);
   await pool.end();
