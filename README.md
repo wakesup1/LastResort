@@ -185,6 +185,69 @@ After building, run `TEST_DATABASE_URL=<your-disposable-test-url> npm run test:h
 
 For browser verification, use a dedicated disposable test database and check event → review → confirm → result → refresh. Verify loading, sold-out/error responses, repeated clicks while sending, missing cookies, cross-owner links and safe read retry. Simulate response loss after the reservation commits: the review must show an unknown outcome, preserve its local operation identity across reload, and send no second booking POST. Choose **Check booking result** on Review or History: it must reopen the same ticket without creating another session or booking. Also check recovery with a closed/sold-out event, an unavailable recovery response, no completed operation and lost cookies; unknown results must stay blocked with an explicit read retry. Inspect the affected pages at 320, 390, 768, 1024 and 1440px, with keyboard focus, reduced motion and 200% text. Browser checks supplement the database tests; a simulated UI response alone does not prove a database guarantee.
 
+## HTTP performance baseline (S3-02)
+
+Use a **dedicated disposable PostgreSQL 17 database**, already migrated with the persisted `test` environment marker, and its **direct (unpooled)** connection URL. The baseline never loads a test URL from `.env.local` or falls back to the demo's `DATABASE_URL`. A matching database name alone does not establish that the database is disposable. Do not run this alongside another app, reset or test suite using that database.
+
+```sh
+# Build the current source, start one loopback production server, and measure 1, 5, then 10 concurrent HTTP requests.
+TEST_DATABASE_URL='<dedicated-direct-test-url>' npm run test:baseline
+
+# Optional: one to three distinct concurrency levels, each from 1 to 10.
+TEST_DATABASE_URL='<dedicated-direct-test-url>' npm run test:baseline -- --concurrency 1,5
+```
+
+Each level uses a new capacity-100 event and **200 distinct one-ticket operations**, with a new key for every operation. A fixed number of workers submit their next operation only after the previous response is consumed: this is a bounded, closed-loop workload, not 200 simultaneous connections or an open-loop arrival-rate test. The existing application pool has five connections; the observer uses one separate connection. Default measurement is bounded to 600 booking requests, plus 16 successful warmup bookings and 16 session-setup requests. Stay within the selected free service's quotas.
+
+Build/startup, session creation and warmup are excluded from measurement. Each worker establishes its guest through the real session endpoint before measurement, then makes one warmup booking on a separate event. The measured duration runs from the start of the measured worker batch until all its responses, including bodies, have completed or failed. Client latency includes request construction, local HTTP handling and response decoding. The 10-second client timeout is retained as an observed latency; booking requests are never automatically retried. Unique operation keys, fixture IDs and scheduling differ between runs.
+
+`test-results/baseline/<run>/summary.json` and per-level reports record the Git revision, dirty flag, runner fingerprint, build ID, Node/PostgreSQL versions, platform, database locality, workload, requested/actual peak concurrency, duration, throughput, p50/p95/max latency, individual attempts and post-load inventory. Percentiles use nearest rank. All attempts contribute to total latency and request throughput. Confirmed and sold-out latencies, and confirmed tickets per second, are also reported separately:
+
+- `errorRate` counts timeouts, transport failures and unexpected statuses/payloads.
+- `businessRejectionRate` counts valid 409 `SOLD_OUT` responses. These are expected once capacity is exhausted and are shown separately from technical errors.
+- `nonSuccessRate` includes every attempt that did not return a new confirmed ticket, including sold-out responses. An error rate of zero does not mean every request obtained a ticket.
+
+The runner correlates the application's existing request diagnostics with responses and retains only numeric server-duration summaries. That timing includes pool waiting and application/database work; it is not a database-query timer. During measurement, the observer samples aggregate application connections, active backends and lock waits through `pg_stat_activity`, waiting 100ms after each completed observation query. Sampling adds observer overhead and can miss short waits; a sample fraction is not a precise fraction of elapsed time. Reports contain no raw SQL, driver errors, URLs, cookies, session tokens, reservation references or retry keys.
+
+After each load, one database snapshot checks inventory conservation, committed reservations, stored business outcomes and incomplete operations. A separate read checks that every returned ticket belongs to its originating worker's guest. Unexpected responses and timeouts remain in the report; the owned server is stopped before verifying uncertain results. A failed level stops subsequent levels and is never retried or hidden by a later pass. Failed preflight/build/warmup runs and interrupted partial runs retain their stage and available observations; a `running` report after a hard interruption is incomplete evidence.
+
+On exit the runner stops its own server and removes only its own event, operation, reservation and session fixtures. It does not reset/reseed existing events or change the application pool, SQL, indexes, instance count or public demo. Unit checks for metric calculation, bounded work, interruption, inventory reconciliation and diagnostic redaction run in `npm test`; the measured baseline is an explicit command, not a performance threshold in shared CI. Use the recorded environment and workload when comparing runs. These measurements do not establish a production SLA, a maximum supported load or an optimization improvement.
+
+### Reference measurement: 2026-11-01
+
+Run `2026-11-01T14-14-44.882Z-fc8a26de-52a3-4d32-b447-447d038128ab` completed at 14:18:04 UTC (21:18:04 Bangkok). Application revision: `ee319083c26befb907396c7a5511a5033c890a17`; the working tree included the uncommitted S3-02 harness. Its SHA-256 was `0361b6f25b6f1bf6d8de440241243afa6ceacf177958a345c2a18b119d06839f` and the production build ID was `2gqJT8uz7yBjdSETWk4cw`. The application source and database schema were unchanged for this measurement.
+
+Environment: Node.js 24.20.0, macOS/darwin arm64 with 8 available logical CPUs, one local production Next.js server and load generator on the same desktop, and remote direct Neon PostgreSQL 17.11 on a newly migrated, separate disposable test database. The application pool remained at five connections, plus one observer connection. No other verification commands ran during this reference measurement; ordinary desktop and remote database activity were uncontrolled.
+
+Each row measures 200 distinct requests against capacity 100. Latency covers **all responses**, including sold-out responses; confirmations/s uses the entire batch duration, including its sold-out portion. Actual peak in-flight counts matched the requested concurrency.
+
+| HTTP concurrency | Duration (s) | p50 (ms) | p95 (ms) | Max (ms) | Requests/s | Confirmations/s | Technical error rate |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 101.288 | 435.07 | 714.15 | 9426.22 | 1.975 | 0.987 | 0% |
+| 5 | 42.769 | 1002.86 | 1575.45 | 2035.85 | 4.676 | 2.338 | 0% |
+| 10 | 43.751 | 2094.28 | 2728.14 | 3114.21 | 4.571 | 2.286 | 0% |
+
+Every level returned exactly 100 HTTP 201 confirmations and 100 HTTP 409 `SOLD_OUT` responses: business rejection and non-success rates were both 50%. There were zero timeouts, transport errors or unexpected responses. Every post-load snapshot had capacity 100, remaining 0, confirmed reservations 100, stored operations 200, stored sold-out outcomes 100 and incomplete operations 0. All returned tickets matched their originating guests. Warmup checks and fixture cleanup also passed.
+
+Observed bottlenecks and limits:
+
+- Application lock waits appeared in 0/528, 232/234 and 235/238 activity samples at concurrency 1, 5 and 10 respectively. Maximum observed application connections were 1, 5 and 5; maximum lock-waiting backends were 0, 4 and 4. Together with `reserveTicket` locking the same event using `SELECT ... FOR UPDATE` until commit, this is consistent with contention on the shared event serializing work. Aggregate samples do not identify the exact lock object or measure individual lock-wait durations.
+- Throughput was similar at concurrency 5 and 10 (4.676 versus 4.571 requests/s), while p95 increased from 1.575s to 2.728s. The fixed five-connection pool is another possible source of waiting at HTTP concurrency 10; pool queue time was not measured separately. These single observations do not establish a statistically significant regression or a maximum capacity.
+- Server diagnostic p50/p95 values were 427.72/707.50ms, 996.09/1568.21ms and 2087.63/2716.48ms, close to client timings. Most observed latency was within the server path, which includes pool waiting and multiple sequential database round trips. Remote database/network delay is a plausible contributor, but no per-query timing, network RTT or local-database comparison isolates it.
+- Concurrency 1 retained a 9426.22ms confirmed response (request index 44), with server duration 9417.90ms. Its activity series also contains a 7143.26ms observation gap. The cause was not isolated; no sampled lock waits does not rule out unobserved waits. This outlier remains in duration, throughput and latency statistics despite falling above p95.
+- This is a finite, warmed, closed-loop booking workload with pre-established guests and a 50% sold-out mix. It does not measure sustained successful bookings with available inventory, cold starts, browser/network experience, CPU/I/O saturation, production traffic or multiple instances. No pool, SQL, index or infrastructure optimization was applied or claimed.
+
+Raw attempts, timing samples and verification results are retained locally under `test-results/baseline/<run>/`; these ignored artifacts are not part of a fresh checkout. The reference run's `summary.json` and `concurrency-1.json`, `concurrency-5.json`, `concurrency-10.json` are the source for the rounded values above. Reproduce with the command and workload described here rather than treating the table as an SLA.
+
+Earlier invocations remain available in the same local evidence directory (all times UTC on 2026-11-01):
+
+| Run start | Outcome and interpretation |
+| --- | --- |
+| 14:03:36.394 | Preflight rejected a missing `TEST_DATABASE_URL`; no booking requests were sent. |
+| 14:04:12.765 and 14:05:55.254 | Build failed before load; the earlier harness retained the stage but did not retain a build-failure classification. |
+| 14:07:07.362 | All three pilot levels passed. A 0.497s unit-test run overlapped the end of concurrency 10 on the shared host, so a separate reference run was measured without overlapping verification commands. |
+| 14:12:00.851 | Build stopped with the existing Next.js security advisory, classified as `security_advisory`; no booking requests were sent. The subsequent reference invocation built and completed successfully. This task did not change dependencies or resolve that advisory. |
+
 ## API contract and CI
 
 [api/openapi.json](api/openapi.json) is the OpenAPI 3.0 contract. Each operation has an `x-implementation` marker: health, event details, guest sessions, atomic booking, owned reservation details, booking history and read-only operation recovery are implemented. The booking contract includes required retry keys, 200 replay, 201 creation and 409 payload conflicts. Booking and health responses include a server-generated `X-Request-Id`.
