@@ -2,7 +2,7 @@
 
 LastResort is a limited-capacity ticket booking demo focused on correct inventory, guest ownership and recovery when a response is lost. One fictional event offers free general-admission tickets: each deliberate confirmation reserves one ticket immediately. Reviewing does not hold a ticket, and there is no payment or cancellation.
 
-[Open the demo](https://last-resort-five.vercel.app/) · [API contract](api/openapi.json) · [Setup](#run-from-a-fresh-checkout) · [Evidence](#verification-at-a-glance) · [Demo script](#demo-script)
+[Open the demo](https://last-resort-five.vercel.app/) · [API contract](api/openapi.json) · [Setup](#run-from-a-fresh-checkout) · [Evidence](#verification-at-a-glance) · [Release review](SPRINT_3_REVIEW.md) · [Demo script](#demo-script)
 
 The event's fixed sale window closes on **21 November 2026 at 18:00 Asia/Bangkok**. The demo uses a limited shared inventory; booking consumes a ticket. Bookings are accessible only in the original browser while its guest session remains valid. Clearing cookies, expiry or changing browsers cannot recover them.
 
@@ -30,12 +30,13 @@ The browser displays availability as information; it is not the inventory author
 
 | Evidence | Result and scope |
 | --- | --- |
+| Sprint 3 release review, 2026-11-06 | Production deployment and [CI run 42200310575](https://github.com/wakesup1/LastResort/actions/runs/42200310575) identify revision `d6dde43665adfd2a2f8929545e3ea192e7fd5ff0`. CI passed 220 unit/contract tests, 41 integration tests, three concurrency rounds, build, HTTP and three failure scenarios. The hosted booking/reopen/history smoke test and all 12 security-probe checks passed. [Release scope, results and retrospective](SPRINT_3_REVIEW.md). |
 | Fresh setup, 2026-11-03 | Clean archive of revision `a42dce9549457453f718d68f653448d13ba9b862`, Node 24.20.0/macOS arm64 and a new local PostgreSQL 17 container: install, migrate, seed, status, health, typecheck, **220 unit/contract tests**, build and **41 integration tests** passed. The integration suite used a separate disposable database. |
 | Correctness and recovery, S3-06 | [CI run 41573168603](https://github.com/wakesup1/LastResort/actions/runs/41573168603) on revision `b6c0e4e8ed81ece61f57862f9d21fb6bba533a8b`: three rounds of last-ticket contention and 200 operations against capacity 100, plus commit rollback, application crash and response-loss recovery, passed on isolated PostgreSQL 17.11. [Details](#post-deployment-regression-s3-06). |
 | Hosted journey and security | The S3-06 deployed revision passed an event-to-history smoke test and the bounded S3-05 HTTP security probe. These results apply to the recorded revision, not automatically to later deployments. [Details](#hosted-security-verification-s3-05). |
 | Performance baseline, S3-02 | On revision `ee31908`, with a local server and separate remote Neon test database, 200 requests at concurrency 5 produced p50 1002.86 ms, p95 1575.45 ms and 4.676 requests/s, including 100 sold-out responses. This is one finite test, not production capacity or an SLA. [Full workload, results and limits](#http-performance-baseline-s3-02). |
 
-The correctness and failure suites run in a disposable test environment, not against the live database. Browser smoke tests do not prove behavior under contention. Owner walkthrough feedback, production database-host recovery, multi-instance behavior and verification of later deployments are not established by these results.
+The correctness and failure suites run in a disposable test environment, not against the live database. Browser smoke tests do not prove behavior under contention. Owner walkthrough feedback, production database-host recovery, multi-instance behavior and verification of future deployments are not established by these results.
 
 ## Demo script
 
