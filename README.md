@@ -1,6 +1,51 @@
 # LastResort
 
-A limited-capacity ticket booking platform. The first release has one demo event, guest sessions, and immediate confirmation. S1-05 provides the Next.js foundation, PostgreSQL 17, migrations, seed data, and a health check. S1-06 adds API contracts and CI. S1-08/S1-09 provide the event details page and server-derived sale status. S1-10 adds server-managed guest sessions. S1-11 adds atomic one-ticket booking; S1-12 connects the browser booking journey and ownership-safe result reopening. S2-03 adds persistent owner-scoped idempotency; S2-07 adds safe structured diagnostics and booking-schema readiness. S2-05 adds same-browser booking history; S2-06 adds read-only recovery of the original operation after response loss. The project interface, sample data, and documentation are in English.
+LastResort is a limited-capacity ticket booking demo focused on correct inventory, guest ownership and recovery when a response is lost. One fictional event offers free general-admission tickets: each deliberate confirmation reserves one ticket immediately. Reviewing does not hold a ticket, and there is no payment or cancellation.
+
+[Open the demo](https://last-resort-five.vercel.app/) · [API contract](api/openapi.json) · [Setup](#run-from-a-fresh-checkout) · [Evidence](#verification-at-a-glance) · [Demo script](#demo-script)
+
+The event's fixed sale window closes on **21 November 2026 at 18:00 Asia/Bangkok**. The demo uses a limited shared inventory; booking consumes a ticket. Bookings are accessible only in the original browser while its guest session remains valid. Clearing cookies, expiry or changing browsers cannot recover them.
+
+## Architecture and decisions
+
+```mermaid
+flowchart LR
+  Browser["Browser: event → review → result → history"] -->|"same-origin HTTPS + guest cookie"| App["Next.js pages and Node.js route handlers"]
+  App -->|"validated, parameterized SQL"| DB[("PostgreSQL 17")]
+  DB --> Tables["events · guest sessions · reservations · booking operations"]
+  Browser -->|"saved operation identity for recovery"| Browser
+```
+
+The browser displays availability as information; it is not the inventory authority. The server creates the guest session and checks ownership for private reads. On confirmation, one database transaction claims the owner-scoped idempotency key, locks the event, checks database time and remaining inventory, then stores the ticket and outcome before commit. A retry of the same operation can replay the stored result; a different payload conflicts. An unknown outcome stays unknown until the original operation is resolved. See [the reservation code](src/server/reservations.ts), [session code](src/server/guest-session.ts) and [API contract](api/openapi.json).
+
+| Decision | Benefit | Tradeoff or boundary |
+| --- | --- | --- |
+| One Next.js app with route handlers and direct `pg` queries | A small deployment and explicit transaction boundaries | Application and database remain coupled; no separate service or queue. |
+| PostgreSQL event-row lock and atomic reservation | The database arbitrates competing writes and prevents overselling | Requests for the same event serialize; contention can increase latency. |
+| Persistent owner-scoped operation key | Retries replay the original result without another ticket | Operation records have no automatic expiry; the browser's conservative unknown-outcome flow cannot recover a lost guest session. |
+| Server-issued guest cookie | No account or personal data is required | History is same-browser only; a reference alone is not authorization. |
+| Vercel Hobby and Neon Free for a fictional demo | A low-cost single-application demo | Free-plan quotas, cold starts, service availability and terms can change; this is not a production SLA. Check current provider usage before a demo. Preview database isolation has not been established. |
+
+## Verification at a glance
+
+| Evidence | Result and scope |
+| --- | --- |
+| Fresh setup, 2026-11-03 | Clean archive of revision `a42dce9549457453f718d68f653448d13ba9b862`, Node 24.20.0/macOS arm64 and a new local PostgreSQL 17 container: install, migrate, seed, status, health, typecheck, **220 unit/contract tests**, build and **41 integration tests** passed. The integration suite used a separate disposable database. |
+| Correctness and recovery, S3-06 | [CI run 41573168603](https://github.com/wakesup1/LastResort/actions/runs/41573168603) on revision `b6c0e4e8ed81ece61f57862f9d21fb6bba533a8b`: three rounds of last-ticket contention and 200 operations against capacity 100, plus commit rollback, application crash and response-loss recovery, passed on isolated PostgreSQL 17.11. [Details](#post-deployment-regression-s3-06). |
+| Hosted journey and security | The S3-06 deployed revision passed an event-to-history smoke test and the bounded S3-05 HTTP security probe. These results apply to the recorded revision, not automatically to later deployments. [Details](#hosted-security-verification-s3-05). |
+| Performance baseline, S3-02 | On revision `ee31908`, with a local server and separate remote Neon test database, 200 requests at concurrency 5 produced p50 1002.86 ms, p95 1575.45 ms and 4.676 requests/s, including 100 sold-out responses. This is one finite test, not production capacity or an SLA. [Full workload, results and limits](#http-performance-baseline-s3-02). |
+
+The correctness and failure suites run in a disposable test environment, not against the live database. Browser smoke tests do not prove behavior under contention. Owner walkthrough feedback, production database-host recovery, multi-instance behavior and verification of later deployments are not established by these results.
+
+## Demo script
+
+1. Open the [demo](https://last-resort-five.vercel.app/) and show the fictional event, Bangkok time, free price and advisory availability. Explain that entering Review reserves nothing.
+2. Select **Review booking** and confirm one ticket. Wait for the server-confirmed result; point out the reference and the same-browser session limitation. This consumes one shared demo ticket.
+3. Reload the result, open **My bookings**, then reopen the same ticket. Explain that a deliberate **Reserve another ticket** starts a new operation; refreshing or checking a result does not.
+4. Open the same result URL in a separate browser without the original cookie to demonstrate denied access. Do not paste a cookie or token into another browser. Return to the original browser to show the owned result.
+5. Explain the unknown-outcome case: keep the original session and use **Check booking result** rather than creating a new operation. To demonstrate actual response loss or a rollback, use the dedicated disposable test environment and the [failure suite](#rollback-response-loss-and-application-restart-s2-08), not the shared demo.
+
+If sales are closed, inventory is sold out or the service is unavailable, show the actual state instead of promising a successful booking. Reset is only for an explicitly disposable database; never reset the active demo to stage a presentation.
 
 ## Run from a fresh checkout
 
@@ -73,7 +118,7 @@ Use PostgreSQL 17 for local development, CI, and the demo. Database commands rej
 
 ## Pre-deployment security review (S3-03)
 
-The 2026-11-01 review covers LR-T12 before deployment, based on application revision `ee319083c26befb907396c7a5511a5033c890a17` plus the S3-03 dependency patch and regression checks. It covers guest ownership, cookies, cross-site mutations, input boundaries, logs and repository/client-bundle exposure. Verification on the hosted HTTPS release remains S3-05, after S3-04 deploys a recorded release candidate.
+The 2026-11-01 review covers LR-T12 before deployment, based on application revision `ee319083c26befb907396c7a5511a5033c890a17` plus the S3-03 dependency patch and regression checks. It covers guest ownership, cookies, cross-site mutations, input boundaries, logs and repository/client-bundle exposure. The later hosted checks and their tested revisions are recorded under S3-05 and S3-06 below.
 
 The review found one affected dependency in `npm audit`: Next.js 16.4.0, with two critical advisories and one high advisory. Next.js and the directly used `@next/env` are now pinned to **16.4.3**, with their lockfile updated together; the installed image dependency is `sharp` 0.35.5. The [maintainer security update](https://nextjs.org/blog/nextjs-security-update-october-14-2026) describes the affected cache, image and Server Action paths. We applied the patch without assuming that unused application features make an affected framework safe. The post-patch audit reported **zero known vulnerabilities** on the review date; this is a registry-advisory result, not a general security guarantee.
 
@@ -96,9 +141,9 @@ For the online candidate, set `APP_ORIGIN` to its exact canonical **HTTPS** orig
 
 ## Release candidate operations (S3-04)
 
-The candidate is the existing Vercel Hobby production deployment of `main` revision `385853e01b1c49afda0a2ac20186e516f14356cc`, created on 2026-11-03 at 09:50:56 Asia/Bangkok. Vercel reports it Ready at [last-resort-five.vercel.app](https://last-resort-five.vercel.app/); its [deployment details](https://vercel.com/wakesup1s-projects/last-resort/BENBhnDxjpPqpwus6cN4mSh2an5Y) identify the revision. On 2026-11-03, `/api/health` returned `{"status":"ok","database":"ready"}` and the event page showed open sales and 93 remaining tickets. A Safari walkthrough confirmed one free ticket at 10:10 Bangkok time, reopened the same result after a page reload and found it in the same browser's history. This consumed one demo ticket; no data was reset. It is a smoke check, not a failure-injection or ownership-isolation test.
+The S3-04 candidate was the Vercel Hobby production deployment of `main` revision `385853e01b1c49afda0a2ac20186e516f14356cc`, created on 2026-11-03 at 09:50:56 Asia/Bangkok. Vercel reported it Ready at [last-resort-five.vercel.app](https://last-resort-five.vercel.app/); its [deployment details](https://vercel.com/wakesup1s-projects/last-resort/BENBhnDxjpPqpwus6cN4mSh2an5Y) identify that historical revision. On 2026-11-03, `/api/health` returned `{"status":"ok","database":"ready"}` and the event page showed open sales and 93 remaining tickets. A Safari walkthrough confirmed one free ticket at 10:10 Bangkok time, reopened the same result after a page reload and found it in the same browser's history. This consumed one demo ticket; no data was reset. It is a smoke check, not a failure-injection or ownership-isolation test.
 
-Vercel lists `APP_ENV`, `DATABASE_URL` and `APP_ORIGIN` as secret variables assigned to both Production and Preview; values were not revealed. Successful canonical-origin booking and health demonstrate those paths for this deployment, but do not independently establish the exact effective configuration or that Preview uses a separate database. Do not run destructive tests against Preview unless its database has been independently identified as disposable. The candidate is not the final release: S3-05 and S3-06 must pass on this revision first.
+At that inspection Vercel listed `APP_ENV`, `DATABASE_URL` and `APP_ORIGIN` as secret variables assigned to both Production and Preview; values were not revealed. Successful canonical-origin booking and health demonstrated those paths for that deployment, but did not independently establish the exact effective configuration or that Preview uses a separate database. Do not run destructive tests against Preview unless its database has been independently identified as disposable. A release requires security and regression checks for its actual deployed revision.
 
 The Vercel build completed with npm warnings about its `cache-dir` environment configuration and an unapproved `esbuild` install script. The build log reported zero known vulnerabilities at install time; neither that report nor the Ready status proves runtime security. On the inspection date the Hobby dashboard showed usage below the displayed included limits. Monitor current usage and terms before future deployments; no paid upgrade was enabled.
 
@@ -106,13 +151,13 @@ Configure the host with Node.js 24, `APP_ENV=demo`, the existing demo PostgreSQL
 
 After deployment, request `/api/health` on the canonical origin. HTTP 200 with `database: ready` confirms the required schema is readable; HTTP 503 indicates a database or schema problem, not a successful deployment. Check provider status, server-side configuration, database connectivity and migration state without exposing secrets in logs. Health alone does not verify a booking. Record actual results and retain the previous deployment for rollback.
 
-For an unknown booking outcome, keep the original browser session and operation identity and use **Check booking result** or history as described above. Do not reset data or start a new operation to resolve uncertainty. If the candidate fails, check database schema and configuration compatibility, then in Vercel open the project Deployments list, select the previous production deployment's actions and choose **Instant Rollback**. Review the deployment and domains in the confirmation before applying it. On Hobby only the immediately previous production deployment is eligible. Vercel listed the previous deployment as Ready at revision `7eabefa47dbc8f00c3c39a1634eb01f52aecb04b`; it predates the S3-03 dependency security patch, so assess that risk before using it. The menu was inspected but rollback was not executed on the active demo. Deployment retention can remove old deployments, so confirm the target still exists. A rollback restores the old deployment's configuration and stops automatic production-domain assignment; after fixing the issue, use **Undo Rollback** on the production overview and promote the intended deployment to restore automatic assignment. See [Vercel's rollback instructions](https://vercel.com/docs/instant-rollback).
+For an unknown booking outcome, keep the original browser session and operation identity and use **Check booking result** or history as described above. Do not reset data or start a new operation to resolve uncertainty. If a deployment fails, check database schema and configuration compatibility, then in Vercel open the project Deployments list, select the previous production deployment's actions and choose **Instant Rollback**. Review the deployment and domains in the confirmation before applying it. On Hobby only the immediately previous production deployment is eligible. At the S3-04 inspection the previous deployment was revision `7eabefa47dbc8f00c3c39a1634eb01f52aecb04b`; it predates the S3-03 security patch. That historical revision is not necessarily the current rollback target: inspect the actual previous deployment and its security before acting. The menu was inspected but rollback was not executed on the active demo. Deployment retention can remove old deployments, so confirm the target still exists. A rollback restores the old deployment's configuration and stops automatic production-domain assignment; after fixing the issue, use **Undo Rollback** on the production overview and promote the intended deployment to restore automatic assignment. See [Vercel's rollback instructions](https://vercel.com/docs/instant-rollback).
 
 Application rollback does not undo migrations or restore database contents; investigate database recovery separately using the provider's verified backup and restore procedure. Recheck health and record the restored revision and result. Never reset an active demo to recover an outage. The earlier S2-08 test evidence in this README covers application transaction rollback, response loss and process restart on a disposable database; it does not verify Vercel rollback or a database restore.
 
 ## Hosted security verification (S3-05)
 
-On 2026-11-03, Vercel reported production deployment [Ahp87hzme](https://vercel.com/wakesup1s-projects/last-resort/Ahp87hzme4qwuLvPU98gD9gShjEd) Ready for revision `1d2bfd7f9ae483a3580b92479fd4514d130723ab`, with the canonical demo domain assigned. This is the deployment created after the S3-04 documentation merge; the earlier candidate revision above identifies the earlier smoke test, not the current production revision.
+On 2026-11-03, Vercel reported production deployment [Ahp87hzme](https://vercel.com/wakesup1s-projects/last-resort/Ahp87hzme4qwuLvPU98gD9gShjEd) Ready for revision `1d2bfd7f9ae483a3580b92479fd4514d130723ab`, with the canonical demo domain assigned. This was the deployment created after the S3-04 documentation merge; the S3-04 candidate above identifies an earlier smoke test, and S3-06 below records a later deployment.
 
 Checks against the canonical HTTPS domain passed for health and HTTP-to-HTTPS redirect; a newly created guest cookie had `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, a 30-day max age and no `Domain`. The same session resumed without a replacement cookie. A fresh guest's history was empty; a different owner's existing reference returned the same 404 body as an unknown reference, and no session received 401. Session and reservation mutations rejected a foreign origin; a forged owner field and forwarded-host spoof were rejected. Tested private reads were `no-store`, did not grant cross-origin access, and a cross-origin preflight did not grant access. The Safari owner could refresh its existing history after deployment; a separate in-app browser without that session could not open the owner's result. These are bounded checks, not a complete browser or security audit.
 
